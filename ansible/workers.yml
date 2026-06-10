@@ -1,0 +1,56 @@
+---
+- name: Generate Kubernetes worker join command
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Generate fresh kubeadm join command
+      ansible.builtin.command: kubeadm token create --print-join-command
+      register: kubeadm_join_command
+      changed_when: false
+
+    - name: Store kubeadm join command as fact
+      ansible.builtin.set_fact:
+        worker_join_command: "{{ kubeadm_join_command.stdout }}"
+
+
+- name: Join worker nodes to Kubernetes cluster
+  hosts: workers
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: Check if worker node is already joined
+      ansible.builtin.stat:
+        path: /etc/kubernetes/kubelet.conf
+      register: kubelet_conf
+
+    - name: Join worker node to Kubernetes cluster
+      ansible.builtin.command: "{{ hostvars[groups['masters'][0]].worker_join_command }}"
+      when: not kubelet_conf.stat.exists
+      register: kubeadm_join_result
+
+    - name: Ensure kubelet is enabled and started
+      ansible.builtin.systemd:
+        name: kubelet
+        enabled: true
+        state: started
+
+
+- name: Verify Kubernetes nodes from master
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Get Kubernetes nodes
+      ansible.builtin.command: kubectl get nodes -o wide
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: kubernetes_nodes
+      changed_when: false
+
+    - name: Show Kubernetes nodes
+      ansible.builtin.debug:
+        msg: "{{ kubernetes_nodes.stdout_lines }}"

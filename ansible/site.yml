@@ -1,0 +1,9 @@
+---
+- name: Configure common prerequisites on all Kubernetes nodes
+  import_playbook: common.yml
+
+- name: Initialize Kubernetes control plane
+  import_playbook: master.yml
+
+- name: Join worker nodes to Kubernetes cluster
+  import_playbook: workers.yml
