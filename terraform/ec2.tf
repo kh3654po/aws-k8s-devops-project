@@ -44,6 +44,9 @@ resource "aws_instance" "master" {
   # public subnet에 있으므로 public IP 할당
   associate_public_ip_address = true
 
+  # Kubernetes Master Node는 클러스터의 API 서버 역할을 하므로, 다른 노드에서 Master Node로 트래픽이 올 수 있도록 source_dest_check를 false로 설정하여 네트워크 트래픽이 원활하게 흐르도록 함
+  source_dest_check = false
+
   # 보안 그룹 설정
   vpc_security_group_ids = [aws_security_group.k8s.id]
 
@@ -75,6 +78,9 @@ resource "aws_instance" "worker" {
 
   # private subnet이므로 public IP 미할당
   associate_public_ip_address = false
+
+  # Kubernetes Worker Node는 클러스터의 워커 역할을 하므로, Master Node와 통신이 원활하게 이루어질 수 있도록 source_dest_check를 false로 설정하여 네트워크 트래픽이 원활하게 흐르도록 함 
+  source_dest_check = false
 
   # 보안 그룹 설정
   vpc_security_group_ids = [aws_security_group.k8s.id]

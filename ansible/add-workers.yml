@@ -45,6 +45,30 @@
       delegate_to: "{{ groups['masters'][0] }}"
       changed_when: false
 
+    - name: Wait for Calico DaemonSet rollout
+      ansible.builtin.command: >
+        kubectl rollout status
+        daemonset/calico-node
+        -n calico-system
+        --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      delegate_to: "{{ groups['masters'][0] }}"
+      run_once: true
+      changed_when: false
+
+    - name: Wait for kube-proxy DaemonSet rollout
+      ansible.builtin.command: >
+        kubectl rollout status
+        daemonset/kube-proxy
+        -n kube-system
+        --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      delegate_to: "{{ groups['masters'][0] }}"
+      run_once: true
+      changed_when: false
+
     - name: Get Kubernetes node status
       ansible.builtin.command: kubectl get nodes -o wide
       environment:

@@ -111,7 +111,14 @@
         --image=curlimages/curl:8.10.1
         --restart=Never
         --command --
-        curl -sS http://nginx
+        curl
+        -fsS
+        --connect-timeout 5
+        --max-time 20
+        --retry 3
+        --retry-delay 2
+        --retry-connrefused
+        http://nginx
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
       register: curl_run
