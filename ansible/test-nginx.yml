@@ -1,0 +1,161 @@
+---
+- name: Verify Kubernetes cluster with nginx workload
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars:
+    kubeconfig_path: /etc/kubernetes/admin.conf
+    test_namespace: devops-test
+    nginx_manifest_path: /tmp/nginx-test.yaml
+    cleanup_after_test: false
+
+  tasks:
+    - name: Write nginx test manifest
+      ansible.builtin.copy:
+        dest: "{{ nginx_manifest_path }}"
+        mode: "0644"
+        content: |
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: {{ test_namespace }}
+          ---
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: nginx
+            namespace: {{ test_namespace }}
+          spec:
+            replicas: 3
+            selector:
+              matchLabels:
+                app: nginx
+            template:
+              metadata:
+                labels:
+                  app: nginx
+              spec:
+                containers:
+                  - name: nginx
+                    image: nginx:1.27-alpine
+                    ports:
+                      - containerPort: 80
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: nginx
+            namespace: {{ test_namespace }}
+          spec:
+            type: ClusterIP
+            selector:
+              app: nginx
+            ports:
+              - port: 80
+                targetPort: 80
+
+    - name: Apply nginx test manifest
+      ansible.builtin.command: kubectl apply -f {{ nginx_manifest_path }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: nginx_apply
+      changed_when: >
+        'created' in nginx_apply.stdout or
+        'configured' in nginx_apply.stdout
+
+    - name: Wait for nginx deployment rollout
+      ansible.builtin.command: >
+        kubectl rollout status deployment/nginx
+        -n {{ test_namespace }}
+        --timeout=180s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Show nginx pods
+      ansible.builtin.command: kubectl get pods -n {{ test_namespace }} -o wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: nginx_pods
+      changed_when: false
+
+    - name: Print nginx pods
+      ansible.builtin.debug:
+        msg: "{{ nginx_pods.stdout_lines }}"
+
+    - name: Show nginx service
+      ansible.builtin.command: kubectl get svc nginx -n {{ test_namespace }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: nginx_service
+      changed_when: false
+
+    - name: Print nginx service
+      ansible.builtin.debug:
+        msg: "{{ nginx_service.stdout_lines }}"
+
+    - name: Delete previous curl test pod if exists
+      ansible.builtin.command: >
+        kubectl delete pod curl-test
+        -n {{ test_namespace }}
+        --ignore-not-found=true
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Run curl test pod
+      ansible.builtin.command: >
+        kubectl run curl-test
+        -n {{ test_namespace }}
+        --image=curlimages/curl:8.10.1
+        --restart=Never
+        --command --
+        curl -sS http://nginx
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: curl_run
+      changed_when: true
+
+    - name: Wait for curl test pod to complete
+      ansible.builtin.shell: |
+        set -e
+
+        for i in $(seq 1 60); do
+          PHASE=$(kubectl get pod curl-test -n {{ test_namespace }} -o jsonpath='{.status.phase}' 2>/dev/null || true)
+
+          if [ "$PHASE" = "Succeeded" ]; then
+            exit 0
+          fi
+
+          if [ "$PHASE" = "Failed" ]; then
+            kubectl logs curl-test -n {{ test_namespace }} || true
+            exit 1
+          fi
+
+          sleep 2
+        done
+
+        kubectl get pod curl-test -n {{ test_namespace }} -o wide || true
+        exit 1
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Get curl test result
+      ansible.builtin.command: kubectl logs curl-test -n {{ test_namespace }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: curl_result
+      changed_when: false
+      failed_when: "'Welcome to nginx!' not in curl_result.stdout"
+
+    - name: Print curl test result
+      ansible.builtin.debug:
+        msg: "nginx service test succeeded"
+
+    - name: Cleanup nginx test namespace
+      ansible.builtin.command: kubectl delete namespace {{ test_namespace }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      when: cleanup_after_test | bool
