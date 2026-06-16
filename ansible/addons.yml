@@ -7,24 +7,6 @@
   vars_files:
     - vars/cluster.yml
 
-  vars:
-    calico_crd_url: >-
-      https://raw.githubusercontent.com/projectcalico/calico/{{
-        calico_version
-      }}/manifests/v1_crd_projectcalico_org.yaml
-
-    calico_operator_url: >-
-      https://raw.githubusercontent.com/projectcalico/calico/{{
-        calico_version
-      }}/manifests/tigera-operator.yaml
-
-    calico_custom_resources_url: >-
-      https://raw.githubusercontent.com/projectcalico/calico/{{
-        calico_version
-      }}/manifests/custom-resources.yaml
-
-    calico_custom_resources_path: /tmp/calico-custom-resources.yaml
-
   tasks:
     - name: Check Kubernetes administrator kubeconfig
       ansible.builtin.stat:
@@ -42,30 +24,109 @@
         success_msg: >-
           Kubernetes administrator kubeconfig was found.
 
-    - name: Apply Calico custom resource definitions
-      ansible.builtin.command:
-        argv:
-          - kubectl
-          - apply
-          - --server-side
-          - --filename
-          - "{{ calico_crd_url }}"
+    - name: Check Helm binary
+      ansible.builtin.stat:
+        path: "{{ helm_binary_path }}"
+      register: addons_helm_binary
+
+    - name: Fail when Helm is not installed
+      ansible.builtin.assert:
+        that:
+          - addons_helm_binary.stat.exists
+          - addons_helm_binary.stat.executable
+        fail_msg: >-
+          Helm executable was not found at {{ helm_binary_path }}.
+          Run helm.yml before addons.yml.
+        success_msg: >-
+          Helm executable was found.
+
+    - name: Install Python YAML library for Kubernetes collection
+      ansible.builtin.apt:
+        name: python3-yaml
+        state: present
+        update_cache: true
+
+    - name: Add Project Calico Helm repository
+      kubernetes.core.helm_repository:
+        name: "{{ calico_repository_name }}"
+        repo_url: "{{ calico_repository_url }}"
+        binary_path: "{{ helm_binary_path }}"
+        repo_state: present
+        force_update: true
+
+    - name: Create Tigera Operator namespace
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        kubectl create namespace {{ calico_release_namespace }} \
+          --dry-run=client \
+          --output=yaml |
+        kubectl apply --filename=-
+      args:
+        executable: /bin/bash
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
-      register: calico_crd_apply
+      register: tigera_namespace_apply
+      changed_when: >-
+        'created' in tigera_namespace_apply.stdout or
+        'configured' in tigera_namespace_apply.stdout
+
+    - name: Render and apply Calico custom resource definitions
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        {{ helm_binary_path }} template calico-crds \
+          {{ calico_crd_chart }} \
+          --version {{ calico_version }} |
+        kubectl apply \
+          --server-side \
+          --filename=-
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: calico_crds_apply
       changed_when: false
 
-    - name: Apply Tigera Operator
-      ansible.builtin.command:
-        argv:
-          - kubectl
-          - apply
-          - --filename
-          - "{{ calico_operator_url }}"
-      environment:
-        KUBECONFIG: "{{ kubeconfig_path }}"
-      register: calico_operator_apply
-      changed_when: false
+    - name: Render Calico Helm values
+      ansible.builtin.template:
+        src: calico-values.yml.j2
+        dest: "{{ calico_values_remote_path }}"
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Install or upgrade Calico Helm release
+      kubernetes.core.helm:
+        name: "{{ calico_release_name }}"
+        chart_ref: "{{ calico_operator_chart }}"
+        chart_version: "{{ calico_version }}"
+        release_namespace: "{{ calico_release_namespace }}"
+        create_namespace: true
+        release_state: present
+
+        values_files:
+          - "{{ calico_values_remote_path }}"
+
+        kubeconfig: "{{ kubeconfig_path }}"
+        binary_path: "{{ helm_binary_path }}"
+
+        update_repo_cache: true
+        reset_values: true
+        wait: true
+        timeout: 10m0s
+        history_max: 10
+
+      register: calico_helm_release
+
+    - name: Show Calico Helm release result
+      ansible.builtin.debug:
+        msg:
+          - "Release: {{ calico_helm_release.status.name }}"
+          - "Namespace: {{ calico_helm_release.status.namespace }}"
+          - "Chart: {{ calico_helm_release.status.chart }}"
+          - "Revision: {{ calico_helm_release.status.revision }}"
+          - "Status: {{ calico_helm_release.status.status }}"
 
     - name: Wait for Tigera Operator deployment
       ansible.builtin.command:
@@ -75,43 +136,10 @@
           - status
           - deployment/tigera-operator
           - --namespace
-          - tigera-operator
+          - "{{ calico_release_namespace }}"
           - --timeout=300s
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
-      changed_when: false
-
-    - name: Download Calico custom resources manifest
-      ansible.builtin.get_url:
-        url: "{{ calico_custom_resources_url }}"
-        dest: "{{ calico_custom_resources_path }}"
-        owner: root
-        group: root
-        mode: "0644"
-        force: true
-
-    - name: Configure Calico Pod network CIDR
-      ansible.builtin.replace:
-        path: "{{ calico_custom_resources_path }}"
-        regexp: '(^\s*cidr:\s*).*$'
-        replace: '\g<1>{{ pod_network_cidr }}'
-
-    - name: Configure Calico encapsulation mode
-      ansible.builtin.replace:
-        path: "{{ calico_custom_resources_path }}"
-        regexp: '(^\s*encapsulation:\s*).*$'
-        replace: '\g<1>{{ calico_encapsulation }}'
-
-    - name: Apply Calico custom resources
-      ansible.builtin.command:
-        argv:
-          - kubectl
-          - apply
-          - --filename
-          - "{{ calico_custom_resources_path }}"
-      environment:
-        KUBECONFIG: "{{ kubeconfig_path }}"
-      register: calico_custom_resources_apply
       changed_when: false
 
     - name: Wait for Calico Node DaemonSet to be created

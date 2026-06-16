@@ -5,14 +5,31 @@ pod_network_cidr: "192.168.0.0/16"
 # kubeadm이 생성하는 관리자 kubeconfig
 kubeconfig_path: /etc/kubernetes/admin.conf
 
-# 설치할 Calico 버전
-calico_version: "v3.32.0"
-
-# Calico Node 간 트래픽 캡슐화 방식
-calico_encapsulation: "VXLANCrossSubnet"
-
 # 원격 Control Plane에서 kubectl을 사용할 일반 사용자
 kubernetes_admin_user: ubuntu
 
 # ubuntu 사용자의 kubeconfig 경로
 kubernetes_user_kubeconfig: /home/ubuntu/.kube/config
+
+
+# Helm
+helm_binary_path: /usr/local/bin/helm
+
+# Calico
+calico_version: "v3.32.0"
+
+calico_repository_name: projectcalico
+
+calico_repository_url: https://docs.tigera.io/calico/charts
+
+calico_crd_chart: projectcalico/crd.projectcalico.org.v1
+
+calico_operator_chart: projectcalico/tigera-operator
+
+calico_release_name: calico
+
+calico_release_namespace: tigera-operator
+
+calico_values_remote_path: /tmp/calico-values.yml
+
+calico_encapsulation: VXLANCrossSubnet

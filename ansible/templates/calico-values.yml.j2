@@ -1,0 +1,6 @@
+---
+installation:
+  calicoNetwork:
+    ipPools:
+      - cidr: "{{ pod_network_cidr }}"
+        encapsulation: "{{ calico_encapsulation }}"
