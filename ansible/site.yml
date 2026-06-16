@@ -5,5 +5,8 @@
 - name: Initialize Kubernetes control plane
   import_playbook: master.yml
 
+- name: Install Helm on Kubernetes control plane
+  import_playbook: helm.yml
+
 - name: Join worker nodes to Kubernetes cluster
   import_playbook: workers.yml
