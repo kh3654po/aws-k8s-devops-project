@@ -1,0 +1,184 @@
+---
+- name: Install Kubernetes cluster add-ons
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  vars:
+    calico_crd_url: >-
+      https://raw.githubusercontent.com/projectcalico/calico/{{
+        calico_version
+      }}/manifests/v1_crd_projectcalico_org.yaml
+
+    calico_operator_url: >-
+      https://raw.githubusercontent.com/projectcalico/calico/{{
+        calico_version
+      }}/manifests/tigera-operator.yaml
+
+    calico_custom_resources_url: >-
+      https://raw.githubusercontent.com/projectcalico/calico/{{
+        calico_version
+      }}/manifests/custom-resources.yaml
+
+    calico_custom_resources_path: /tmp/calico-custom-resources.yaml
+
+  tasks:
+    - name: Check Kubernetes administrator kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: addons_kubeconfig
+
+    - name: Fail when Kubernetes control plane is not initialized
+      ansible.builtin.assert:
+        that:
+          - addons_kubeconfig.stat.exists
+        fail_msg: >-
+          Kubernetes administrator kubeconfig was not found at
+          {{ kubeconfig_path }}.
+          Run master.yml before addons.yml.
+        success_msg: >-
+          Kubernetes administrator kubeconfig was found.
+
+    - name: Apply Calico custom resource definitions
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - --server-side
+          - --filename
+          - "{{ calico_crd_url }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: calico_crd_apply
+      changed_when: false
+
+    - name: Apply Tigera Operator
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - --filename
+          - "{{ calico_operator_url }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: calico_operator_apply
+      changed_when: false
+
+    - name: Wait for Tigera Operator deployment
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment/tigera-operator
+          - --namespace
+          - tigera-operator
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Download Calico custom resources manifest
+      ansible.builtin.get_url:
+        url: "{{ calico_custom_resources_url }}"
+        dest: "{{ calico_custom_resources_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+        force: true
+
+    - name: Configure Calico Pod network CIDR
+      ansible.builtin.replace:
+        path: "{{ calico_custom_resources_path }}"
+        regexp: '(^\s*cidr:\s*).*$'
+        replace: '\g<1>{{ pod_network_cidr }}'
+
+    - name: Configure Calico encapsulation mode
+      ansible.builtin.replace:
+        path: "{{ calico_custom_resources_path }}"
+        regexp: '(^\s*encapsulation:\s*).*$'
+        replace: '\g<1>{{ calico_encapsulation }}'
+
+    - name: Apply Calico custom resources
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - --filename
+          - "{{ calico_custom_resources_path }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: calico_custom_resources_apply
+      changed_when: false
+
+    - name: Wait for Calico Node DaemonSet to be created
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        for i in $(seq 1 60); do
+          if kubectl get daemonset calico-node \
+            --namespace calico-system \
+            >/dev/null 2>&1; then
+            exit 0
+          fi
+
+          sleep 5
+        done
+
+        echo "Calico Node DaemonSet was not created before timeout."
+        exit 1
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Wait for Calico Node DaemonSet rollout
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - daemonset/calico-node
+          - --namespace
+          - calico-system
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Get Calico installation configuration
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - installation
+          - default
+          - --output
+          - yaml
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: calico_installation
+      changed_when: false
+
+    - name: Get Calico Pod status
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pods
+          - --namespace
+          - calico-system
+          - --output
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: calico_pods
+      changed_when: false
+
+    - name: Show Calico Pod status
+      ansible.builtin.debug:
+        msg: "{{ calico_pods.stdout_lines }}"

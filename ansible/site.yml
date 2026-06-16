@@ -1,12 +1,15 @@
 ---
 - name: Configure common prerequisites on all Kubernetes nodes
-  import_playbook: common.yml
+  ansible.builtin.import_playbook: common.yml
 
 - name: Initialize Kubernetes control plane
-  import_playbook: master.yml
+  ansible.builtin.import_playbook: master.yml
 
 - name: Install Helm on Kubernetes control plane
-  import_playbook: helm.yml
+  ansible.builtin.import_playbook: helm.yml
+
+- name: Install Kubernetes cluster add-ons
+  ansible.builtin.import_playbook: addons.yml
 
 - name: Join worker nodes to Kubernetes cluster
-  import_playbook: workers.yml
+  ansible.builtin.import_playbook: workers.yml
