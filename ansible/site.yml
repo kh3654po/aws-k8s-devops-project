@@ -13,3 +13,6 @@
 
 - name: Join worker nodes to Kubernetes cluster
   ansible.builtin.import_playbook: workers.yml
+
+- name: Install Kubernetes Metrics Server
+  ansible.builtin.import_playbook: metrics-server.yml

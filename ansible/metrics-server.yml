@@ -1,0 +1,135 @@
+---
+- name: Install Kubernetes Metrics Server
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  tasks:
+    - name: Check Kubernetes administrator kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: metrics_server_kubeconfig
+
+    - name: Fail when Kubernetes control plane is not initialized
+      ansible.builtin.assert:
+        that:
+          - metrics_server_kubeconfig.stat.exists
+        fail_msg: >-
+          Kubernetes administrator kubeconfig was not found at
+          {{ kubeconfig_path }}.
+          Run master.yml before metrics-server.yml.
+        success_msg: >-
+          Kubernetes administrator kubeconfig was found.
+
+    - name: Check Helm binary
+      ansible.builtin.stat:
+        path: "{{ helm_binary_path }}"
+      register: metrics_server_helm_binary
+
+    - name: Fail when Helm is not installed
+      ansible.builtin.assert:
+        that:
+          - metrics_server_helm_binary.stat.exists
+          - metrics_server_helm_binary.stat.executable
+        fail_msg: >-
+          Helm executable was not found at
+          {{ helm_binary_path }}.
+          Run helm.yml before metrics-server.yml.
+        success_msg: >-
+          Helm executable was found.
+
+    - name: Add Metrics Server Helm repository
+      kubernetes.core.helm_repository:
+        name: "{{ metrics_server_repository_name }}"
+        repo_url: "{{ metrics_server_repository_url }}"
+        binary_path: "{{ helm_binary_path }}"
+        repo_state: present
+
+    - name: Install or upgrade Metrics Server Helm release
+      kubernetes.core.helm:
+        name: "{{ metrics_server_release_name }}"
+        chart_ref: "{{ metrics_server_chart }}"
+        chart_version: "{{ metrics_server_chart_version }}"
+
+        release_namespace: "{{ metrics_server_release_namespace }}"
+        release_state: present
+
+        release_values:
+          args: "{{ metrics_server_extra_args }}"
+
+        kubeconfig: "{{ kubeconfig_path }}"
+        binary_path: "{{ helm_binary_path }}"
+
+        update_repo_cache: true
+        reset_values: true
+
+        wait: true
+        timeout: 5m0s
+        history_max: 10
+      register: metrics_server_helm_release
+
+    - name: Wait for Metrics Server deployment rollout
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment/metrics-server
+          - --namespace
+          - "{{ metrics_server_release_namespace }}"
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Wait for Metrics APIService to become available
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - wait
+          - --for=condition=Available
+          - apiservice/v1beta1.metrics.k8s.io
+          - --timeout=180s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Wait until node metrics are available
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - top
+          - nodes
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: metrics_server_top_nodes
+      changed_when: false
+      retries: 30
+      delay: 10
+      until: metrics_server_top_nodes.rc == 0
+
+    - name: Get Pod resource metrics
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - top
+          - pods
+          - --all-namespaces
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: metrics_server_top_pods
+      changed_when: false
+      retries: 12
+      delay: 5
+      until: metrics_server_top_pods.rc == 0
+
+    - name: Show Node resource metrics
+      ansible.builtin.debug:
+        msg: "{{ metrics_server_top_nodes.stdout_lines }}"
+
+    - name: Show Pod resource metrics
+      ansible.builtin.debug:
+        msg: "{{ metrics_server_top_pods.stdout_lines }}"
