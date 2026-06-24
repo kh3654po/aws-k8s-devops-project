@@ -1,0 +1,350 @@
+---
+- name: Test Kubernetes Horizontal Pod Autoscaler
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  vars:
+    hpa_namespace: autoscaling-test
+
+    hpa_deployment_name: php-apache
+    hpa_service_name: php-apache
+
+    hpa_demo_image: registry.k8s.io/hpa-example:latest
+    hpa_load_image: busybox:1.36.1
+
+    hpa_manifest_remote_path: /tmp/hpa-demo.yml
+
+    hpa_cpu_request: 200m
+    hpa_cpu_limit: 500m
+
+    hpa_memory_request: 64Mi
+    hpa_memory_limit: 128Mi
+
+    hpa_min_replicas: 1
+    hpa_max_replicas: 5
+    hpa_target_cpu_utilization: 50
+
+    hpa_scale_down_stabilization_seconds: 60
+
+    verify_scale_down: true
+    cleanup_after_test: false
+
+  tasks:
+    - name: Check Kubernetes administrator kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: hpa_kubeconfig
+
+    - name: Fail when Kubernetes control plane is not initialized
+      ansible.builtin.assert:
+        that:
+          - hpa_kubeconfig.stat.exists
+        fail_msg: >-
+          Kubernetes administrator kubeconfig was not found at
+          {{ kubeconfig_path }}.
+        success_msg: >-
+          Kubernetes administrator kubeconfig was found.
+
+    - name: Verify Kubernetes Metrics API
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - --raw
+          - /apis/metrics.k8s.io/v1beta1/nodes
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: hpa_metrics_api
+      changed_when: false
+
+    - name: Render HPA demonstration manifest
+      ansible.builtin.template:
+        src: hpa-demo.yml.j2
+        dest: "{{ hpa_manifest_remote_path }}"
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Apply HPA demonstration resources
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - --filename
+          - "{{ hpa_manifest_remote_path }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: hpa_resources_apply
+      changed_when: >-
+        'created' in hpa_resources_apply.stdout or
+        'configured' in hpa_resources_apply.stdout
+
+    - name: Wait for HPA demonstration deployment rollout
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - "deployment/{{ hpa_deployment_name }}"
+          - --namespace
+          - "{{ hpa_namespace }}"
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Wait for HPA to become able to scale
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - wait
+          - --for=condition=AbleToScale
+          - "horizontalpodautoscaler/{{ hpa_deployment_name }}"
+          - --namespace
+          - "{{ hpa_namespace }}"
+          - --timeout=180s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Wait for HPA metrics to become active
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - wait
+          - --for=condition=ScalingActive
+          - "horizontalpodautoscaler/{{ hpa_deployment_name }}"
+          - --namespace
+          - "{{ hpa_namespace }}"
+          - --timeout=180s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Show initial HPA state
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - hpa
+          - "{{ hpa_deployment_name }}"
+          - --namespace
+          - "{{ hpa_namespace }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: hpa_initial_state
+      changed_when: false
+
+    - name: Display initial HPA state
+      ansible.builtin.debug:
+        msg: "{{ hpa_initial_state.stdout_lines }}"
+
+    - name: Remove previous load generator Pod
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - delete
+          - pod
+          - load-generator
+          - --namespace
+          - "{{ hpa_namespace }}"
+          - --ignore-not-found=true
+          - --wait=true
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Start HTTP load generator
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - run
+          - load-generator
+          - --namespace
+          - "{{ hpa_namespace }}"
+          - "--image={{ hpa_load_image }}"
+          - --restart=Never
+          - --
+          - /bin/sh
+          - -c
+          - >-
+            while sleep 0.01;
+            do
+              wget -q -O- http://{{ hpa_service_name }};
+            done
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: true
+
+    - name: Wait for load generator Pod
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - wait
+          - --for=condition=Ready
+          - pod/load-generator
+          - --namespace
+          - "{{ hpa_namespace }}"
+          - --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Wait for HPA scale out
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - deployment
+          - "{{ hpa_deployment_name }}"
+          - --namespace
+          - "{{ hpa_namespace }}"
+          - --output
+          - "jsonpath={.status.readyReplicas}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: hpa_scaled_out_replicas
+      changed_when: false
+      failed_when: false
+      retries: 60
+      delay: 5
+      until: >-
+        (
+          hpa_scaled_out_replicas.stdout
+          | default('0', true)
+          | int
+        ) >= 2
+
+    - name: Get HPA state under load
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - hpa
+          - "{{ hpa_deployment_name }}"
+          - --namespace
+          - "{{ hpa_namespace }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: hpa_under_load
+      changed_when: false
+
+    - name: Get application Pods under load
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pods
+          - --namespace
+          - "{{ hpa_namespace }}"
+          - --output
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: hpa_pods_under_load
+      changed_when: false
+
+    - name: Get application resource metrics under load
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - top
+          - pods
+          - --namespace
+          - "{{ hpa_namespace }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: hpa_metrics_under_load
+      changed_when: false
+      retries: 12
+      delay: 5
+      until: hpa_metrics_under_load.rc == 0
+
+    - name: Show Scale Out result
+      ansible.builtin.debug:
+        msg:
+          - "{{ hpa_under_load.stdout_lines }}"
+          - "{{ hpa_pods_under_load.stdout_lines }}"
+          - "{{ hpa_metrics_under_load.stdout_lines }}"
+
+    - name: Stop HTTP load generator
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - delete
+          - pod
+          - load-generator
+          - --namespace
+          - "{{ hpa_namespace }}"
+          - --ignore-not-found=true
+          - --wait=true
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: true
+
+    - name: Wait for HPA scale down
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - deployment
+          - "{{ hpa_deployment_name }}"
+          - --namespace
+          - "{{ hpa_namespace }}"
+          - --output
+          - "jsonpath={.spec.replicas}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: hpa_scaled_down_replicas
+      changed_when: false
+      failed_when: false
+      retries: 90
+      delay: 5
+      until: >-
+        (
+          hpa_scaled_down_replicas.stdout
+          | default('0', true)
+          | int
+        ) == hpa_min_replicas
+      when: verify_scale_down | bool
+
+    - name: Show final HPA state
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - hpa
+          - "{{ hpa_deployment_name }}"
+          - --namespace
+          - "{{ hpa_namespace }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: hpa_final_state
+      changed_when: false
+
+    - name: Display final HPA state
+      ansible.builtin.debug:
+        msg: "{{ hpa_final_state.stdout_lines }}"
+
+    - name: Remove HPA test namespace
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - delete
+          - namespace
+          - "{{ hpa_namespace }}"
+          - --ignore-not-found=true
+          - --wait=true
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      when: cleanup_after_test | bool
+      changed_when: true
+
+    - name: Remove temporary HPA manifest
+      ansible.builtin.file:
+        path: "{{ hpa_manifest_remote_path }}"
+        state: absent
