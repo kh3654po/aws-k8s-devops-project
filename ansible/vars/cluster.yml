@@ -1,4 +1,7 @@
 ---
+# Cluster
+cluster_name: ksh-k8s
+
 # Kubernetes Pod 네트워크
 pod_network_cidr: "192.168.0.0/16"
 
@@ -49,3 +52,17 @@ aws_cli_profile: default
 
 # ASG Worker bootstrap
 ssm_join_command_parameter: /ksh/k8s/join-command
+
+# Cluster Autoscaler
+cluster_autoscaler_repository_name: autoscaler
+cluster_autoscaler_repository_url: https://kubernetes.github.io/autoscaler
+
+cluster_autoscaler_chart: autoscaler/cluster-autoscaler
+cluster_autoscaler_chart_version: "9.58.0"
+
+cluster_autoscaler_release_name: cluster-autoscaler
+cluster_autoscaler_release_namespace: kube-system
+
+cluster_autoscaler_values_remote_path: /tmp/cluster-autoscaler-values.yml
+
+cluster_autoscaler_image_tag: "v1.36.0"

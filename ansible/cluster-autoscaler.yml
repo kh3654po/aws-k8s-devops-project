@@ -1,0 +1,134 @@
+---
+- name: Install Kubernetes Cluster Autoscaler
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  tasks:
+    - name: Check Kubernetes administrator kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: cluster_autoscaler_kubeconfig
+
+    - name: Fail when Kubernetes control plane is not initialized
+      ansible.builtin.assert:
+        that:
+          - cluster_autoscaler_kubeconfig.stat.exists
+        fail_msg: >-
+          Kubernetes administrator kubeconfig was not found at
+          {{ kubeconfig_path }}.
+        success_msg: Kubernetes administrator kubeconfig was found.
+
+    - name: Add Cluster Autoscaler Helm repository
+      ansible.builtin.command:
+        argv:
+          - "{{ helm_binary_path }}"
+          - repo
+          - add
+          - "{{ cluster_autoscaler_repository_name }}"
+          - "{{ cluster_autoscaler_repository_url }}"
+          - --force-update
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Update Helm repository cache
+      ansible.builtin.command:
+        argv:
+          - "{{ helm_binary_path }}"
+          - repo
+          - update
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Render Cluster Autoscaler Helm values
+      ansible.builtin.template:
+        src: cluster-autoscaler-values.yml.j2
+        dest: "{{ cluster_autoscaler_values_remote_path }}"
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Install or upgrade Cluster Autoscaler Helm release
+      ansible.builtin.command:
+        argv:
+          - "{{ helm_binary_path }}"
+          - upgrade
+          - --install
+          - "{{ cluster_autoscaler_release_name }}"
+          - "{{ cluster_autoscaler_chart }}"
+          - --namespace
+          - "{{ cluster_autoscaler_release_namespace }}"
+          - --version
+          - "{{ cluster_autoscaler_chart_version }}"
+          - --values
+          - "{{ cluster_autoscaler_values_remote_path }}"
+          - --wait
+          - --timeout
+          - 10m0s
+          - --history-max
+          - "10"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: cluster_autoscaler_helm
+      changed_when: >-
+        'deployed' in cluster_autoscaler_helm.stdout or
+        'upgraded' in cluster_autoscaler_helm.stdout
+
+    - name: Wait for Cluster Autoscaler rollout
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment/cluster-autoscaler
+          - --namespace
+          - "{{ cluster_autoscaler_release_namespace }}"
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Show Cluster Autoscaler Pod
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pods
+          - --namespace
+          - "{{ cluster_autoscaler_release_namespace }}"
+          - -l
+          - app.kubernetes.io/name=cluster-autoscaler
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: cluster_autoscaler_pods
+      changed_when: false
+
+    - name: Display Cluster Autoscaler Pod
+      ansible.builtin.debug:
+        msg: "{{ cluster_autoscaler_pods.stdout_lines }}"
+
+    - name: Show recent Cluster Autoscaler logs
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - logs
+          - deployment/cluster-autoscaler
+          - --namespace
+          - "{{ cluster_autoscaler_release_namespace }}"
+          - --tail=80
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: cluster_autoscaler_logs
+      changed_when: false
+      failed_when: false
+
+    - name: Display recent Cluster Autoscaler logs
+      ansible.builtin.debug:
+        msg: "{{ cluster_autoscaler_logs.stdout_lines }}"

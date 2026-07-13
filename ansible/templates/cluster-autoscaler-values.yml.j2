@@ -1,0 +1,51 @@
+---
+cloudProvider: aws
+awsRegion: "{{ aws_region }}"
+
+autoDiscovery:
+  clusterName: "{{ cluster_name }}"
+
+fullnameOverride: cluster-autoscaler
+
+image:
+  tag: "{{ cluster_autoscaler_image_tag }}"
+
+rbac:
+  create: true
+
+  serviceAccount:
+    create: true
+    name: cluster-autoscaler
+    automountServiceAccountToken: true
+
+hostNetwork: true
+dnsPolicy: ClusterFirstWithHostNet
+
+nodeSelector:
+  node-role.kubernetes.io/control-plane: ""
+
+tolerations:
+  - key: node-role.kubernetes.io/control-plane
+    operator: Exists
+    effect: NoSchedule
+
+  - key: node-role.kubernetes.io/master
+    operator: Exists
+    effect: NoSchedule
+
+extraArgs:
+  logtostderr: true
+  stderrthreshold: info
+  v: 4
+  balance-similar-node-groups: true
+  expander: least-waste
+  skip-nodes-with-local-storage: false
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 300Mi
+
+  limits:
+    cpu: 200m
+    memory: 500Mi

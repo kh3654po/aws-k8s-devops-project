@@ -53,6 +53,14 @@ resource "aws_instance" "master" {
   # 기존에 AWS에 생성되어 있는 Key Pair 이름
   key_name = var.key_name
 
+  iam_instance_profile = aws_iam_instance_profile.master.name
+
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 2
+  }
+
   root_block_device {
     volume_size = 20
     volume_type = "gp3"

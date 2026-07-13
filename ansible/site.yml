@@ -19,3 +19,6 @@
 
 - name: Install Kubernetes Metrics Server
   ansible.builtin.import_playbook: metrics-server.yml
+
+- name: Install Kubernetes Cluster Autoscaler
+  ansible.builtin.import_playbook: cluster-autoscaler.yml
