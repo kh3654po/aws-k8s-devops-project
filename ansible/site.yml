@@ -5,6 +5,9 @@
 - name: Initialize Kubernetes control plane
   ansible.builtin.import_playbook: master.yml
 
+- name: Publish kubeadm join command for ASG worker nodes
+  ansible.builtin.import_playbook: publish-join-command.yml
+
 - name: Install Helm on Kubernetes control plane
   ansible.builtin.import_playbook: helm.yml
 

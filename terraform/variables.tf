@@ -63,3 +63,13 @@ variable "worker_asg_health_check_grace_period" {
   type    = number
   default = 300
 }
+
+variable "ssm_join_command_parameter" {
+  type    = string
+  default = "/ksh/k8s/join-command"
+}
+
+variable "kubernetes_apt_version" {
+  type    = string
+  default = "v1.36"
+}

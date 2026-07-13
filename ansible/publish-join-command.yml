@@ -1,0 +1,86 @@
+---
+- name: Publish kubeadm join command for ASG worker nodes
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  tasks:
+    - name: Check Kubernetes administrator kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: kubeconfig_stat
+
+    - name: Fail when Kubernetes control plane is not initialized
+      ansible.builtin.assert:
+        that:
+          - kubeconfig_stat.stat.exists
+        fail_msg: >-
+          Kubernetes administrator kubeconfig was not found at
+          {{ kubeconfig_path }}.
+        success_msg: Kubernetes administrator kubeconfig was found.
+
+    - name: Generate kubeadm join command for worker nodes
+      ansible.builtin.command:
+        argv:
+          - kubeadm
+          - token
+          - create
+          - --ttl
+          - "0"
+          - --print-join-command
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: kubeadm_join_command
+      changed_when: true
+      no_log: true
+
+    - name: Store kubeadm join command in SSM Parameter Store
+      ansible.builtin.command:
+        argv:
+          - aws
+          - ssm
+          - put-parameter
+          - --region
+          - "{{ aws_region }}"
+          - --profile
+          - "{{ aws_cli_profile }}"
+          - --name
+          - "{{ ssm_join_command_parameter }}"
+          - --type
+          - SecureString
+          - --value
+          - "{{ kubeadm_join_command.stdout }}"
+          - --overwrite
+      delegate_to: localhost
+      become: false
+      changed_when: true
+      no_log: true
+
+    - name: Confirm SSM parameter exists
+      ansible.builtin.command:
+        argv:
+          - aws
+          - ssm
+          - get-parameter
+          - --region
+          - "{{ aws_region }}"
+          - --profile
+          - "{{ aws_cli_profile }}"
+          - --name
+          - "{{ ssm_join_command_parameter }}"
+          - --with-decryption
+          - --query
+          - Parameter.Name
+          - --output
+          - text
+      delegate_to: localhost
+      become: false
+      register: ssm_parameter_check
+      changed_when: false
+
+    - name: Display SSM parameter name
+      ansible.builtin.debug:
+        msg: "Stored kubeadm join command in {{ ssm_parameter_check.stdout }}"

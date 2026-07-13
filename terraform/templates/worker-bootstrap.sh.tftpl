@@ -7,49 +7,137 @@ LOG_FILE="/var/log/k8s-worker-bootstrap.log"
 exec > >(tee -a "$${LOG_FILE}") 2>&1
 
 echo "========================================"
-echo "Kubernetes Worker Bootstrap"
+echo "Kubernetes ASG Worker Bootstrap"
 echo "========================================"
 echo "Cluster name: ${cluster_name}"
 echo "Region      : ${region}"
+echo "SSM param   : ${ssm_join_command_parameter}"
 echo "Started at  : $(date -Is)"
 echo
 
-echo "[1/5] Waiting for cloud-init..."
+export DEBIAN_FRONTEND=noninteractive
+export AWS_REGION="${region}"
+export SSM_JOIN_COMMAND_PARAMETER="${ssm_join_command_parameter}"
 
-cloud-init status --wait || true
+echo "[1/9] Running inside cloud-init user data. Skipping cloud-init wait."
 
 echo
-echo "[2/5] Writing bootstrap metadata..."
+echo "[2/9] Disabling swap..."
 
-cat >/etc/kubernetes-worker-bootstrap.env <<EOF
-CLUSTER_NAME=${cluster_name}
-AWS_REGION=${region}
+swapoff -a || true
+
+sed -i.bak '/ swap / s/^/#/' /etc/fstab || true
+
+echo
+echo "[3/9] Configuring kernel modules and sysctl..."
+
+cat >/etc/modules-load.d/k8s.conf <<'EOF'
+overlay
+br_netfilter
 EOF
 
-echo
-echo "[3/5] Preparing placeholder for worker bootstrap..."
+modprobe overlay
+modprobe br_netfilter
 
-cat >/usr/local/bin/k8s-worker-bootstrap.sh <<'EOF'
-#!/usr/bin/env bash
-
-set -euo pipefail
-
-echo "This placeholder will be replaced in the worker bootstrap step."
-echo "Future tasks:"
-echo "- Install containerd"
-echo "- Install kubelet/kubeadm/kubectl"
-echo "- Read kubeadm join command from SSM Parameter Store"
-echo "- Run kubeadm join"
+cat >/etc/sysctl.d/k8s.conf <<'EOF'
+net.bridge.bridge-nf-call-iptables = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+net.ipv4.ip_forward = 1
 EOF
 
-chmod +x /usr/local/bin/k8s-worker-bootstrap.sh
+sysctl --system
 
 echo
-echo "[4/5] Bootstrap placeholder installed."
+echo "[4/9] Installing base packages..."
 
-/usr/local/bin/k8s-worker-bootstrap.sh
+apt update -y
+
+apt install -y \
+  apt-transport-https \
+  ca-certificates \
+  curl \
+  gpg \
+  unzip \
+  containerd
 
 echo
-echo "[5/5] Bootstrap template completed."
+echo "[4-1/9] Installing AWS CLI v2..."
+
+curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" \
+  -o "/tmp/awscliv2.zip"
+
+rm -rf /tmp/aws
+
+unzip -q /tmp/awscliv2.zip -d /tmp
+
+/tmp/aws/install
+
+aws --version
+
+echo
+echo "[5/9] Configuring containerd..."
+
+mkdir -p /etc/containerd
+
+containerd config default >/etc/containerd/config.toml
+
+sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+
+systemctl restart containerd
+systemctl enable containerd
+
+echo
+echo "[6/9] Installing Kubernetes packages..."
+
+mkdir -p /etc/apt/keyrings
+
+curl -fsSL "https://pkgs.k8s.io/core:/stable:/${kubernetes_apt_version}/deb/Release.key" \
+  | gpg --dearmor --yes -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
+cat >/etc/apt/sources.list.d/kubernetes.list <<EOF
+deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/${kubernetes_apt_version}/deb/ /
+EOF
+
+apt update -y
+
+apt install -y kubelet kubeadm kubectl
+
+apt-mark hold kubelet kubeadm kubectl
+
+systemctl enable kubelet
+
+echo
+echo "[7/9] Checking whether this node already joined..."
+
+if [ -f /etc/kubernetes/kubelet.conf ]; then
+  echo "This node already has /etc/kubernetes/kubelet.conf."
+  echo "Skipping kubeadm join."
+  exit 0
+fi
+
+echo
+echo "[8/9] Reading kubeadm join command from SSM Parameter Store..."
+
+JOIN_COMMAND="$(aws ssm get-parameter \
+  --region "$${AWS_REGION}" \
+  --name "$${SSM_JOIN_COMMAND_PARAMETER}" \
+  --with-decryption \
+  --query 'Parameter.Value' \
+  --output text)"
+
+if [ -z "$${JOIN_COMMAND}" ]; then
+  echo "Failed to read kubeadm join command from SSM Parameter Store."
+  exit 1
+fi
+
+echo "Join command was retrieved from SSM Parameter Store."
+
+echo
+echo "[9/9] Joining Kubernetes cluster..."
+
+$${JOIN_COMMAND}
+
+echo
+echo "Kubernetes ASG worker bootstrap completed."
 echo "Finished at: $(date -Is)"
 echo "Log file   : $${LOG_FILE}"

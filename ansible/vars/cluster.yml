@@ -42,3 +42,10 @@ metrics_server_release_namespace: kube-system
 # 학습 환경에서 임시로 TLS 인증서 검증을 비활성화한다.
 metrics_server_extra_args:
   - --kubelet-insecure-tls
+
+# AWS
+aws_region: ap-northeast-2
+aws_cli_profile: default
+
+# ASG Worker bootstrap
+ssm_join_command_parameter: /ksh/k8s/join-command

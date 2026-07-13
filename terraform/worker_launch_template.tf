@@ -95,8 +95,10 @@ resource "aws_launch_template" "worker" {
     templatefile(
       "${path.module}/templates/worker-bootstrap.sh.tftpl",
       {
-        cluster_name = var.cluster_name
-        region       = var.region
+        cluster_name               = var.cluster_name
+        region                     = var.region
+        ssm_join_command_parameter = var.ssm_join_command_parameter
+        kubernetes_apt_version     = var.kubernetes_apt_version
       }
     )
   )
