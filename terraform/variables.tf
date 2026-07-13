@@ -22,9 +22,24 @@ variable "instance_type" {
 
 variable "worker_count" {
   type    = number
-  default = 2
+  default = 3
 }
 
 variable "my_ip_cidr" {
   type = string
+}
+
+variable "cluster_name" {
+  type    = string
+  default = "ksh-k8s"
+}
+
+variable "worker_asg_instance_type" {
+  type    = string
+  default = "t3.medium"
+}
+
+variable "worker_asg_root_volume_size" {
+  type    = number
+  default = 20
 }

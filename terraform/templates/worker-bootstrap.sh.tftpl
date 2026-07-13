@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+LOG_FILE="/var/log/k8s-worker-bootstrap.log"
+
+exec > >(tee -a "$${LOG_FILE}") 2>&1
+
+echo "========================================"
+echo "Kubernetes Worker Bootstrap"
+echo "========================================"
+echo "Cluster name: ${cluster_name}"
+echo "Region      : ${region}"
+echo "Started at  : $(date -Is)"
+echo
+
+echo "[1/5] Waiting for cloud-init..."
+
+cloud-init status --wait || true
+
+echo
+echo "[2/5] Writing bootstrap metadata..."
+
+cat >/etc/kubernetes-worker-bootstrap.env <<EOF
+CLUSTER_NAME=${cluster_name}
+AWS_REGION=${region}
+EOF
+
+echo
+echo "[3/5] Preparing placeholder for worker bootstrap..."
+
+cat >/usr/local/bin/k8s-worker-bootstrap.sh <<'EOF'
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+echo "This placeholder will be replaced in the worker bootstrap step."
+echo "Future tasks:"
+echo "- Install containerd"
+echo "- Install kubelet/kubeadm/kubectl"
+echo "- Read kubeadm join command from SSM Parameter Store"
+echo "- Run kubeadm join"
+EOF
+
+chmod +x /usr/local/bin/k8s-worker-bootstrap.sh
+
+echo
+echo "[4/5] Bootstrap placeholder installed."
+
+/usr/local/bin/k8s-worker-bootstrap.sh
+
+echo
+echo "[5/5] Bootstrap template completed."
+echo "Finished at: $(date -Is)"
+echo "Log file   : $${LOG_FILE}"

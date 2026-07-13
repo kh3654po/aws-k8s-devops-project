@@ -9,3 +9,15 @@ output "master_private_ip" {
 output "worker_private_ips" {
   value = aws_instance.worker[*].private_ip
 }
+
+output "worker_launch_template_id" {
+  value = aws_launch_template.worker.id
+}
+
+output "worker_launch_template_latest_version" {
+  value = aws_launch_template.worker.latest_version
+}
+
+output "worker_asg_instance_profile_name" {
+  value = aws_iam_instance_profile.worker_asg.name
+}
