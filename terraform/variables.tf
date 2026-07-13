@@ -43,3 +43,23 @@ variable "worker_asg_root_volume_size" {
   type    = number
   default = 20
 }
+
+variable "worker_asg_min_size" {
+  type    = number
+  default = 0
+}
+
+variable "worker_asg_desired_capacity" {
+  type    = number
+  default = 0
+}
+
+variable "worker_asg_max_size" {
+  type    = number
+  default = 3
+}
+
+variable "worker_asg_health_check_grace_period" {
+  type    = number
+  default = 300
+}

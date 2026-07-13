@@ -21,3 +21,19 @@ output "worker_launch_template_latest_version" {
 output "worker_asg_instance_profile_name" {
   value = aws_iam_instance_profile.worker_asg.name
 }
+
+output "worker_asg_name" {
+  value = aws_autoscaling_group.worker.name
+}
+
+output "worker_asg_min_size" {
+  value = aws_autoscaling_group.worker.min_size
+}
+
+output "worker_asg_desired_capacity" {
+  value = aws_autoscaling_group.worker.desired_capacity
+}
+
+output "worker_asg_max_size" {
+  value = aws_autoscaling_group.worker.max_size
+}

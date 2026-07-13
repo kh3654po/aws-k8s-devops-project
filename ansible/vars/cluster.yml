@@ -26,7 +26,7 @@ calico_release_namespace: tigera-operator
 
 calico_values_remote_path: /tmp/calico-values.yml
 
-calico_encapsulation: VXLANCrossSubnet
+calico_encapsulation: VXLAN
 
 # Metrics Server
 metrics_server_repository_name: metrics-server
