@@ -1,0 +1,384 @@
+---
+- name: Test HPA and Cluster Autoscaler integration
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  vars:
+    autoscaling_test_namespace: hpa-ca-test
+
+    autoscaling_test_deployment_name: php-apache-ca
+    autoscaling_test_service_name: php-apache-ca
+
+    autoscaling_test_image: registry.k8s.io/hpa-example:latest
+    autoscaling_test_load_image: busybox:1.36.1
+
+    autoscaling_test_manifest_remote_path: /tmp/hpa-cluster-autoscaler-demo.yml
+
+    autoscaling_test_cpu_request: 100m
+    autoscaling_test_cpu_limit: 500m
+
+    autoscaling_test_memory_request: 1800Mi
+    autoscaling_test_memory_limit: 2000Mi
+
+    autoscaling_test_min_replicas: 1
+    autoscaling_test_max_replicas: 10
+    autoscaling_test_target_cpu_utilization: 50
+
+    autoscaling_test_scale_down_stabilization_seconds: 60
+
+    cleanup_after_test: false
+
+  tasks:
+    - name: Check Kubernetes administrator kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: autoscaling_test_kubeconfig
+
+    - name: Fail when Kubernetes control plane is not initialized
+      ansible.builtin.assert:
+        that:
+          - autoscaling_test_kubeconfig.stat.exists
+        fail_msg: >-
+          Kubernetes administrator kubeconfig was not found at
+          {{ kubeconfig_path }}.
+        success_msg: Kubernetes administrator kubeconfig was found.
+
+    - name: Verify Kubernetes Metrics API
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - --raw
+          - /apis/metrics.k8s.io/v1beta1/nodes
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Verify Cluster Autoscaler deployment
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - deployment
+          - cluster-autoscaler
+          - --namespace
+          - kube-system
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Render HPA and Cluster Autoscaler test manifest
+      ansible.builtin.template:
+        src: hpa-cluster-autoscaler-demo.yml.j2
+        dest: "{{ autoscaling_test_manifest_remote_path }}"
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Apply HPA and Cluster Autoscaler test resources
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - --filename
+          - "{{ autoscaling_test_manifest_remote_path }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: autoscaling_test_apply
+      changed_when: >-
+        'created' in autoscaling_test_apply.stdout or
+        'configured' in autoscaling_test_apply.stdout
+
+    - name: Wait for test deployment rollout
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - "deployment/{{ autoscaling_test_deployment_name }}"
+          - --namespace
+          - "{{ autoscaling_test_namespace }}"
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Wait for HPA metrics to become active
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - wait
+          - --for=condition=ScalingActive
+          - "horizontalpodautoscaler/{{ autoscaling_test_deployment_name }}"
+          - --namespace
+          - "{{ autoscaling_test_namespace }}"
+          - --timeout=180s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Remove previous load generator Pod
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - delete
+          - pod
+          - load-generator
+          - --namespace
+          - "{{ autoscaling_test_namespace }}"
+          - --ignore-not-found=true
+          - --wait=true
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Start HTTP load generator
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - run
+          - load-generator
+          - --namespace
+          - "{{ autoscaling_test_namespace }}"
+          - "--image={{ autoscaling_test_load_image }}"
+          - --restart=Never
+          - --
+          - /bin/sh
+          - -c
+          - >-
+            while sleep 0.01;
+            do
+              wget -q -O- http://{{ autoscaling_test_service_name }};
+            done
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: true
+
+    - name: Wait for load generator Pod
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - wait
+          - --for=condition=Ready
+          - pod/load-generator
+          - --namespace
+          - "{{ autoscaling_test_namespace }}"
+          - --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Wait for HPA scale out
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - deployment
+          - "{{ autoscaling_test_deployment_name }}"
+          - --namespace
+          - "{{ autoscaling_test_namespace }}"
+          - --output
+          - "jsonpath={.spec.replicas}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: autoscaling_test_replicas
+      changed_when: false
+      failed_when: false
+      retries: 60
+      delay: 5
+      until: >-
+        (
+          autoscaling_test_replicas.stdout
+          | default('0', true)
+          | int
+        ) >= 4
+
+    - name: Wait for at least one Pending application Pod
+      ansible.builtin.shell: >-
+        kubectl get pods
+        --namespace {{ autoscaling_test_namespace }}
+        --selector app={{ autoscaling_test_deployment_name }}
+        --field-selector=status.phase=Pending
+        --no-headers
+        2>/dev/null
+        | wc -l
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: autoscaling_test_pending_pods
+      changed_when: false
+      failed_when: false
+      retries: 60
+      delay: 5
+      until: >-
+        (
+          autoscaling_test_pending_pods.stdout
+          | default('0', true)
+          | int
+        ) >= 1
+
+    - name: Show HPA state
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - hpa
+          - "{{ autoscaling_test_deployment_name }}"
+          - --namespace
+          - "{{ autoscaling_test_namespace }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: autoscaling_test_hpa
+      changed_when: false
+
+    - name: Show application Pods
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pods
+          - --namespace
+          - "{{ autoscaling_test_namespace }}"
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: autoscaling_test_pods
+      changed_when: false
+
+    - name: Show Cluster Autoscaler logs
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - logs
+          - deployment/cluster-autoscaler
+          - --namespace
+          - kube-system
+          - --tail=120
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: autoscaling_test_ca_logs
+      changed_when: false
+      failed_when: false
+
+    - name: Display scale out status
+      ansible.builtin.debug:
+        msg:
+          - "{{ autoscaling_test_hpa.stdout_lines }}"
+          - "{{ autoscaling_test_pods.stdout_lines }}"
+          - "{{ autoscaling_test_ca_logs.stdout_lines }}"
+
+    - name: Wait for ASG worker node to join the cluster
+      ansible.builtin.shell: >-
+        kubectl get nodes --no-headers
+        | grep -v control-plane
+        | wc -l
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: autoscaling_test_worker_node_count
+      changed_when: false
+      failed_when: false
+      retries: 90
+      delay: 10
+      until: >-
+        (
+          autoscaling_test_worker_node_count.stdout
+          | default('0', true)
+          | int
+        ) >= 4
+
+    - name: Wait for test deployment to have at least four ready replicas
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - deployment
+          - "{{ autoscaling_test_deployment_name }}"
+          - --namespace
+          - "{{ autoscaling_test_namespace }}"
+          - --output
+          - "jsonpath={.status.readyReplicas}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: autoscaling_test_ready_replicas
+      changed_when: false
+      failed_when: false
+      retries: 90
+      delay: 10
+      until: >-
+        (
+          autoscaling_test_ready_replicas.stdout
+          | default('0', true)
+          | int
+        ) >= 4
+
+    - name: Show final node list
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - nodes
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: autoscaling_test_nodes
+      changed_when: false
+
+    - name: Show final Pod placement
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pods
+          - --namespace
+          - "{{ autoscaling_test_namespace }}"
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: autoscaling_test_final_pods
+      changed_when: false
+
+    - name: Display final autoscaling result
+      ansible.builtin.debug:
+        msg:
+          - "{{ autoscaling_test_nodes.stdout_lines }}"
+          - "{{ autoscaling_test_final_pods.stdout_lines }}"
+
+    - name: Stop HTTP load generator
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - delete
+          - pod
+          - load-generator
+          - --namespace
+          - "{{ autoscaling_test_namespace }}"
+          - --ignore-not-found=true
+          - --wait=true
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: true
+
+    - name: Remove autoscaling test namespace
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - delete
+          - namespace
+          - "{{ autoscaling_test_namespace }}"
+          - --ignore-not-found=true
+          - --wait=true
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      when: cleanup_after_test | bool
+      changed_when: true
+
+    - name: Remove temporary autoscaling test manifest
+      ansible.builtin.file:
+        path: "{{ autoscaling_test_manifest_remote_path }}"
+        state: absent

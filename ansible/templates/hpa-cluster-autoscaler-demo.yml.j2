@@ -1,0 +1,116 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: "{{ autoscaling_test_namespace }}"
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: "{{ autoscaling_test_deployment_name }}"
+  namespace: "{{ autoscaling_test_namespace }}"
+  labels:
+    app: "{{ autoscaling_test_deployment_name }}"
+spec:
+  selector:
+    matchLabels:
+      app: "{{ autoscaling_test_deployment_name }}"
+
+  template:
+    metadata:
+      labels:
+        app: "{{ autoscaling_test_deployment_name }}"
+
+    spec:
+      containers:
+        - name: "{{ autoscaling_test_deployment_name }}"
+          image: "{{ autoscaling_test_image }}"
+          imagePullPolicy: Always
+
+          ports:
+            - name: http
+              containerPort: 80
+              protocol: TCP
+
+          resources:
+            requests:
+              cpu: "{{ autoscaling_test_cpu_request }}"
+              memory: "{{ autoscaling_test_memory_request }}"
+
+            limits:
+              cpu: "{{ autoscaling_test_cpu_limit }}"
+              memory: "{{ autoscaling_test_memory_limit }}"
+
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: "{{ autoscaling_test_service_name }}"
+  namespace: "{{ autoscaling_test_namespace }}"
+spec:
+  type: ClusterIP
+
+  selector:
+    app: "{{ autoscaling_test_deployment_name }}"
+
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: "{{ autoscaling_test_deployment_name }}"
+  namespace: "{{ autoscaling_test_namespace }}"
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: "{{ autoscaling_test_deployment_name }}"
+
+  minReplicas: {{ autoscaling_test_min_replicas }}
+  maxReplicas: {{ autoscaling_test_max_replicas }}
+
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ autoscaling_test_target_cpu_utilization }}
+
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 15
+
+        - type: Pods
+          value: 4
+          periodSeconds: 15
+
+      selectPolicy: Max
+
+    scaleDown:
+      stabilizationWindowSeconds: {{ autoscaling_test_scale_down_stabilization_seconds }}
+
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 15
+
+      selectPolicy: Max
