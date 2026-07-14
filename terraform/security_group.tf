@@ -35,3 +35,14 @@ resource "aws_vpc_security_group_egress_rule" "egress_all" {
   ip_protocol = "-1"
   cidr_ipv4   = "0.0.0.0/0"
 }
+
+# Kubernetes NodePort 서비스 테스트를 위해 내 Mac 공인 IP에서 특정 포트로의 접근 허용
+resource "aws_vpc_security_group_ingress_rule" "nodeport_test_from_my_ip" {
+  security_group_id = aws_security_group.k8s.id
+
+  ip_protocol = "tcp"
+  from_port   = var.nodeport_test_port
+  to_port     = var.nodeport_test_port
+
+  cidr_ipv4 = var.my_ip_cidr
+}

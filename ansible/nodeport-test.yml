@@ -1,0 +1,170 @@
+---
+- name: Test Kubernetes NodePort external access
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  vars:
+    nodeport_test_namespace: nodeport-test
+
+    nodeport_test_deployment_name: nginx-nodeport
+    nodeport_test_service_name: nginx-nodeport
+    nodeport_test_app_label: nginx-nodeport
+
+    nodeport_test_image: nginx:1.27-alpine
+    nodeport_test_replicas: 2
+
+    nodeport_test_port: 30080
+
+    nodeport_test_manifest_remote_path: /tmp/nodeport-nginx.yml
+
+    cleanup_after_test: false
+
+  tasks:
+    - name: Check Kubernetes administrator kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: nodeport_test_kubeconfig
+
+    - name: Fail when Kubernetes control plane is not initialized
+      ansible.builtin.assert:
+        that:
+          - nodeport_test_kubeconfig.stat.exists
+        fail_msg: >-
+          Kubernetes administrator kubeconfig was not found at
+          {{ kubeconfig_path }}.
+        success_msg: Kubernetes administrator kubeconfig was found.
+
+    - name: Render NodePort nginx manifest
+      ansible.builtin.template:
+        src: nodeport-nginx.yml.j2
+        dest: "{{ nodeport_test_manifest_remote_path }}"
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Apply NodePort nginx manifest
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - --filename
+          - "{{ nodeport_test_manifest_remote_path }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: nodeport_test_apply
+      changed_when: >-
+        'created' in nodeport_test_apply.stdout or
+        'configured' in nodeport_test_apply.stdout
+
+    - name: Wait for nginx NodePort deployment rollout
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - "deployment/{{ nodeport_test_deployment_name }}"
+          - --namespace
+          - "{{ nodeport_test_namespace }}"
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Show NodePort Service
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - service
+          - "{{ nodeport_test_service_name }}"
+          - --namespace
+          - "{{ nodeport_test_namespace }}"
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: nodeport_test_service
+      changed_when: false
+
+    - name: Show nginx Pods
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pods
+          - --namespace
+          - "{{ nodeport_test_namespace }}"
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: nodeport_test_pods
+      changed_when: false
+
+    - name: Show nginx Service endpoints
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - endpoints
+          - "{{ nodeport_test_service_name }}"
+          - --namespace
+          - "{{ nodeport_test_namespace }}"
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: nodeport_test_endpoints
+      changed_when: false
+
+    - name: Test NodePort from control plane node
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ nodeport_test_port }}"
+        method: GET
+        status_code: 200
+        return_content: false
+      register: nodeport_test_local_result
+
+    - name: Test NodePort from local machine using master public IP
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host }}:{{ nodeport_test_port }}"
+        method: GET
+        status_code: 200
+        return_content: false
+        timeout: 10
+      delegate_to: localhost
+      become: false
+      register: nodeport_test_external_result
+
+    - name: Display NodePort test result
+      ansible.builtin.debug:
+        msg:
+          - "{{ nodeport_test_service.stdout_lines }}"
+          - "{{ nodeport_test_pods.stdout_lines }}"
+          - "{{ nodeport_test_endpoints.stdout_lines }}"
+          - "Control plane local test status: {{ nodeport_test_local_result.status }}"
+          - "External test URL: http://{{ ansible_host }}:{{ nodeport_test_port }}"
+          - "External test status: {{ nodeport_test_external_result.status }}"
+
+    - name: Remove NodePort test namespace
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - delete
+          - namespace
+          - "{{ nodeport_test_namespace }}"
+          - --ignore-not-found=true
+          - --wait=true
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      when: cleanup_after_test | bool
+      changed_when: true
+
+    - name: Remove temporary NodePort manifest
+      ansible.builtin.file:
+        path: "{{ nodeport_test_manifest_remote_path }}"
+        state: absent

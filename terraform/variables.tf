@@ -73,3 +73,8 @@ variable "kubernetes_apt_version" {
   type    = string
   default = "v1.36"
 }
+
+variable "nodeport_test_port" {
+  type    = number
+  default = 30080
+}
