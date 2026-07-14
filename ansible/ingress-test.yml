@@ -1,0 +1,220 @@
+---
+- name: Test Kubernetes Ingress Resource routing
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  vars:
+    ingress_test_namespace: ingress-test
+
+    ingress_test_deployment_name: nginx-ingress-demo
+    ingress_test_service_name: nginx-ingress-demo
+    ingress_test_ingress_name: nginx-ingress-demo
+    ingress_test_app_label: nginx-ingress-demo
+
+    ingress_test_image: nginx:1.27-alpine
+    ingress_test_replicas: 2
+
+    ingress_test_host: nginx.ksh.local
+
+    ingress_test_manifest_remote_path: /tmp/ingress-demo.yml
+
+    cleanup_after_test: false
+
+  tasks:
+    - name: Check Kubernetes administrator kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: ingress_test_kubeconfig
+
+    - name: Fail when Kubernetes control plane is not initialized
+      ansible.builtin.assert:
+        that:
+          - ingress_test_kubeconfig.stat.exists
+        fail_msg: >-
+          Kubernetes administrator kubeconfig was not found at
+          {{ kubeconfig_path }}.
+        success_msg: Kubernetes administrator kubeconfig was found.
+
+    - name: Verify ingress-nginx controller deployment
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - deployment
+          - ingress-nginx-controller
+          - --namespace
+          - "{{ ingress_nginx_release_namespace }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Verify ingress-nginx controller service
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - service
+          - ingress-nginx-controller
+          - --namespace
+          - "{{ ingress_nginx_release_namespace }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Verify nginx IngressClass
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - ingressclass
+          - "{{ ingress_nginx_class_name }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Render Ingress demo manifest
+      ansible.builtin.template:
+        src: ingress-demo.yml.j2
+        dest: "{{ ingress_test_manifest_remote_path }}"
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Apply Ingress demo manifest
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - --filename
+          - "{{ ingress_test_manifest_remote_path }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: ingress_test_apply
+      changed_when: >-
+        'created' in ingress_test_apply.stdout or
+        'configured' in ingress_test_apply.stdout
+
+    - name: Wait for nginx Ingress demo deployment rollout
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - "deployment/{{ ingress_test_deployment_name }}"
+          - --namespace
+          - "{{ ingress_test_namespace }}"
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Show nginx Ingress demo Pods
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pods
+          - --namespace
+          - "{{ ingress_test_namespace }}"
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: ingress_test_pods
+      changed_when: false
+
+    - name: Show nginx Ingress demo Service
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - service
+          - "{{ ingress_test_service_name }}"
+          - --namespace
+          - "{{ ingress_test_namespace }}"
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: ingress_test_service
+      changed_when: false
+
+    - name: Show nginx Ingress demo EndpointSlices
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - endpointslice
+          - --namespace
+          - "{{ ingress_test_namespace }}"
+          - -l
+          - "kubernetes.io/service-name={{ ingress_test_service_name }}"
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: ingress_test_endpointslices
+      changed_when: false
+
+    - name: Show nginx Ingress Resource
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - ingress
+          - "{{ ingress_test_ingress_name }}"
+          - --namespace
+          - "{{ ingress_test_namespace }}"
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: ingress_test_ingress
+      changed_when: false
+
+    - name: Test Ingress routing from local machine
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host }}:{{ ingress_nginx_http_nodeport }}/"
+        method: GET
+        headers:
+          Host: "{{ ingress_test_host }}"
+        status_code: 200
+        return_content: true
+        timeout: 10
+      delegate_to: localhost
+      become: false
+      register: ingress_test_external_result
+
+    - name: Display Ingress test result
+      ansible.builtin.debug:
+        msg:
+          - "{{ ingress_test_pods.stdout_lines }}"
+          - "{{ ingress_test_service.stdout_lines }}"
+          - "{{ ingress_test_endpointslices.stdout_lines }}"
+          - "{{ ingress_test_ingress.stdout_lines }}"
+          - "External test URL: http://{{ ansible_host }}:{{ ingress_nginx_http_nodeport }}/"
+          - "External test Host header: {{ ingress_test_host }}"
+          - "External test status: {{ ingress_test_external_result.status }}"
+
+    - name: Remove Ingress test namespace
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - delete
+          - namespace
+          - "{{ ingress_test_namespace }}"
+          - --ignore-not-found=true
+          - --wait=true
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      when: cleanup_after_test | bool
+      changed_when: true
+
+    - name: Remove temporary Ingress demo manifest
+      ansible.builtin.file:
+        path: "{{ ingress_test_manifest_remote_path }}"
+        state: absent
