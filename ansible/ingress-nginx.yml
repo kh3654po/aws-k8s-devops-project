@@ -1,0 +1,143 @@
+---
+- name: Install ingress-nginx Ingress Controller
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  tasks:
+    - name: Check Kubernetes administrator kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: ingress_nginx_kubeconfig
+
+    - name: Fail when Kubernetes control plane is not initialized
+      ansible.builtin.assert:
+        that:
+          - ingress_nginx_kubeconfig.stat.exists
+        fail_msg: >-
+          Kubernetes administrator kubeconfig was not found at
+          {{ kubeconfig_path }}.
+        success_msg: Kubernetes administrator kubeconfig was found.
+
+    - name: Add ingress-nginx Helm repository
+      ansible.builtin.command:
+        argv:
+          - "{{ helm_binary_path }}"
+          - repo
+          - add
+          - "{{ ingress_nginx_repository_name }}"
+          - "{{ ingress_nginx_repository_url }}"
+          - --force-update
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Update Helm repository cache
+      ansible.builtin.command:
+        argv:
+          - "{{ helm_binary_path }}"
+          - repo
+          - update
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Render ingress-nginx Helm values
+      ansible.builtin.template:
+        src: ingress-nginx-values.yml.j2
+        dest: "{{ ingress_nginx_values_remote_path }}"
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Install or upgrade ingress-nginx Helm release
+      ansible.builtin.command:
+        argv:
+          - "{{ helm_binary_path }}"
+          - upgrade
+          - --install
+          - "{{ ingress_nginx_release_name }}"
+          - "{{ ingress_nginx_chart }}"
+          - --namespace
+          - "{{ ingress_nginx_release_namespace }}"
+          - --create-namespace
+          - --version
+          - "{{ ingress_nginx_chart_version }}"
+          - --values
+          - "{{ ingress_nginx_values_remote_path }}"
+          - --timeout
+          - 10m0s
+          - --history-max
+          - "10"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: ingress_nginx_helm
+      changed_when: >-
+        'deployed' in ingress_nginx_helm.stdout or
+        'upgraded' in ingress_nginx_helm.stdout
+
+    - name: Wait for ingress-nginx controller rollout
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment/ingress-nginx-controller
+          - --namespace
+          - "{{ ingress_nginx_release_namespace }}"
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Show ingress-nginx Controller Pods
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pods
+          - --namespace
+          - "{{ ingress_nginx_release_namespace }}"
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: ingress_nginx_pods
+      changed_when: false
+
+    - name: Show ingress-nginx Controller Service
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - service
+          - ingress-nginx-controller
+          - --namespace
+          - "{{ ingress_nginx_release_namespace }}"
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: ingress_nginx_service
+      changed_when: false
+
+    - name: Show IngressClass
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - ingressclass
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: ingress_nginx_class
+      changed_when: false
+
+    - name: Display ingress-nginx installation result
+      ansible.builtin.debug:
+        msg:
+          - "{{ ingress_nginx_pods.stdout_lines }}"
+          - "{{ ingress_nginx_service.stdout_lines }}"
+          - "{{ ingress_nginx_class.stdout_lines }}"

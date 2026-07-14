@@ -1,0 +1,32 @@
+---
+controller:
+  replicaCount: 2
+
+  ingressClass: "{{ ingress_nginx_class_name }}"
+
+  ingressClassResource:
+    name: "{{ ingress_nginx_class_name }}"
+    enabled: true
+    default: false
+    controllerValue: k8s.io/ingress-nginx
+  service:
+    enabled: true
+    type: NodePort
+
+    nodePorts:
+      http: "{{ ingress_nginx_http_nodeport }}"
+      https: "{{ ingress_nginx_https_nodeport }}"
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
+    limits:
+      memory: 256Mi
+
+  admissionWebhooks:
+    enabled: true
+
+defaultBackend:
+  enabled: false

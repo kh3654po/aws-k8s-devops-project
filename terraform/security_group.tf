@@ -46,3 +46,25 @@ resource "aws_vpc_security_group_ingress_rule" "nodeport_test_from_my_ip" {
 
   cidr_ipv4 = var.my_ip_cidr
 }
+
+# Kubernetes Ingress Nginx Controller 설치 후, 내 Mac 공인 IP에서 NodePort로 접근 허용
+resource "aws_vpc_security_group_ingress_rule" "ingress_nginx_http_from_my_ip" {
+  security_group_id = aws_security_group.k8s.id
+
+  ip_protocol = "tcp"
+  from_port   = var.ingress_nginx_http_nodeport
+  to_port     = var.ingress_nginx_http_nodeport
+
+  cidr_ipv4 = var.my_ip_cidr
+}
+
+# Kubernetes Ingress Nginx Controller 설치 후, 내 Mac 공인 IP에서 NodePort로 접근 허용
+resource "aws_vpc_security_group_ingress_rule" "ingress_nginx_https_from_my_ip" {
+  security_group_id = aws_security_group.k8s.id
+
+  ip_protocol = "tcp"
+  from_port   = var.ingress_nginx_https_nodeport
+  to_port     = var.ingress_nginx_https_nodeport
+
+  cidr_ipv4 = var.my_ip_cidr
+}

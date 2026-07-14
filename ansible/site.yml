@@ -22,3 +22,6 @@
 
 - name: Install Kubernetes Cluster Autoscaler
   ansible.builtin.import_playbook: cluster-autoscaler.yml
+
+- name: Install ingress-nginx Ingress Controller
+  ansible.builtin.import_playbook: ingress-nginx.yml

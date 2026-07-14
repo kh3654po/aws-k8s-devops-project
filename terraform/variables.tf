@@ -78,3 +78,13 @@ variable "nodeport_test_port" {
   type    = number
   default = 30080
 }
+
+variable "ingress_nginx_http_nodeport" {
+  type    = number
+  default = 30081
+}
+
+variable "ingress_nginx_https_nodeport" {
+  type    = number
+  default = 30443
+}
