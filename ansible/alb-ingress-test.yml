@@ -1,0 +1,610 @@
+---
+- name: Collect AWS instance information from Kubernetes nodes
+  hosts: "masters:workers"
+  become: false
+  gather_facts: false
+
+  tasks:
+    - name: Request EC2 IMDSv2 token
+      ansible.builtin.uri:
+        url: http://169.254.169.254/latest/api/token
+        method: PUT
+        headers:
+          X-aws-ec2-metadata-token-ttl-seconds: "21600"
+        status_code: 200
+        return_content: true
+        timeout: 5
+        use_proxy: false
+      register: alb_test_imds_token
+      changed_when: false
+      no_log: true
+
+    - name: Read EC2 instance identity document
+      ansible.builtin.uri:
+        url: >-
+          http://169.254.169.254/latest/dynamic/instance-identity/document
+        method: GET
+        headers:
+          X-aws-ec2-metadata-token: "{{ alb_test_imds_token.content }}"
+        status_code: 200
+        return_content: true
+        timeout: 5
+        use_proxy: false
+      register: alb_test_instance_identity
+      changed_when: false
+
+    - name: Read Kubernetes node name
+      ansible.builtin.command:
+        argv:
+          - hostname
+      register: alb_test_hostname
+      changed_when: false
+
+    - name: Save AWS node information
+      ansible.builtin.set_fact:
+        alb_test_node_name: "{{ alb_test_hostname.stdout | trim }}"
+        alb_test_instance_id: >-
+          {{
+            (alb_test_instance_identity.content | from_json).instanceId
+          }}
+        alb_test_availability_zone: >-
+          {{
+            (alb_test_instance_identity.content | from_json).availabilityZone
+          }}
+
+- name: Configure and test AWS ALB Ingress
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  vars:
+    alb_test_namespace: alb-test
+
+    alb_test_deployment_name: alb-nginx-demo
+    alb_test_service_name: alb-nginx-demo
+    alb_test_ingress_name: alb-nginx-demo
+    alb_test_app_label: alb-nginx-demo
+
+    alb_test_image: nginx:1.27-alpine
+    alb_test_replicas: 2
+
+    alb_test_manifest_remote_path: /tmp/alb-ingress-demo.yml
+
+    alb_test_aws_profile: default
+
+    cleanup_after_test: false
+
+    alb_test_node_hosts: >-
+      {{
+        (
+          groups['masters'] | default([])
+        )
+        +
+        (
+          groups['workers'] | default([])
+        )
+      }}
+
+  tasks:
+    - name: Check Kubernetes administrator kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: alb_test_kubeconfig
+
+    - name: Fail when Kubernetes control plane is not initialized
+      ansible.builtin.assert:
+        that:
+          - alb_test_kubeconfig.stat.exists
+        fail_msg: >-
+          Kubernetes administrator kubeconfig was not found at
+          {{ kubeconfig_path }}.
+        success_msg: Kubernetes administrator kubeconfig was found.
+
+    - name: Validate AWS node information
+      ansible.builtin.assert:
+        that:
+          - hostvars[item].alb_test_node_name is defined
+          - hostvars[item].alb_test_node_name | length > 0
+          - hostvars[item].alb_test_instance_id is defined
+          - hostvars[item].alb_test_instance_id is match('^i-[a-z0-9]+$')
+          - hostvars[item].alb_test_availability_zone is defined
+          - hostvars[item].alb_test_availability_zone | length > 0
+        fail_msg: >-
+          AWS instance information could not be collected from
+          inventory host {{ item }}.
+      loop: "{{ alb_test_node_hosts | unique }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Configure AWS providerID on Kubernetes nodes
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - patch
+          - node
+          - "{{ hostvars[item].alb_test_node_name }}"
+          - --type=merge
+          - --patch
+          - >-
+            {"spec":{"providerID":"aws:///{{ hostvars[item].alb_test_availability_zone }}/{{ hostvars[item].alb_test_instance_id }}"}}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      loop: "{{ alb_test_node_hosts | unique }}"
+      loop_control:
+        label: "{{ hostvars[item].alb_test_node_name }}"
+      register: alb_test_provider_id_patch
+      changed_when: >-
+        'no change' not in alb_test_provider_id_patch.stdout
+
+    - name: Verify AWS providerID on Kubernetes nodes
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - node
+          - "{{ hostvars[item].alb_test_node_name }}"
+          - -o
+          - jsonpath={.spec.providerID}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      loop: "{{ alb_test_node_hosts | unique }}"
+      loop_control:
+        label: "{{ hostvars[item].alb_test_node_name }}"
+      register: alb_test_provider_id_verify
+      changed_when: false
+      failed_when: >-
+        alb_test_provider_id_verify.stdout | trim !=
+        'aws:///' ~
+        hostvars[item].alb_test_availability_zone ~
+        '/' ~
+        hostvars[item].alb_test_instance_id
+
+    - name: Show Kubernetes nodes with AWS providerID
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - nodes
+          - -o
+          - custom-columns=NAME:.metadata.name,PROVIDER_ID:.spec.providerID
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: alb_test_nodes
+      changed_when: false
+
+    - name: Verify AWS Load Balancer Controller deployment
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - deployment
+          - aws-load-balancer-controller
+          - --namespace
+          - "{{ aws_load_balancer_controller_release_namespace }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Wait for AWS Load Balancer Controller rollout
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment/aws-load-balancer-controller
+          - --namespace
+          - "{{ aws_load_balancer_controller_release_namespace }}"
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Verify ALB IngressClass
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - ingressclass
+          - "{{ aws_load_balancer_controller_ingress_class }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Render ALB Ingress demo manifest
+      ansible.builtin.template:
+        src: alb-ingress-demo.yml.j2
+        dest: "{{ alb_test_manifest_remote_path }}"
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Apply ALB Ingress demo manifest
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - --filename
+          - "{{ alb_test_manifest_remote_path }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: alb_test_apply
+      changed_when: >-
+        'created' in alb_test_apply.stdout or
+        'configured' in alb_test_apply.stdout
+
+    - name: Wait for nginx deployment rollout
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - "deployment/{{ alb_test_deployment_name }}"
+          - --namespace
+          - "{{ alb_test_namespace }}"
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Wait for nginx Pods to become Ready
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - wait
+          - --for=condition=Ready
+          - pod
+          - --selector
+          - "app={{ alb_test_app_label }}"
+          - --namespace
+          - "{{ alb_test_namespace }}"
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Show ALB demo Pods
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pods
+          - --namespace
+          - "{{ alb_test_namespace }}"
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: alb_test_pods
+      changed_when: false
+
+    - name: Show ALB demo Service
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - service
+          - "{{ alb_test_service_name }}"
+          - --namespace
+          - "{{ alb_test_namespace }}"
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: alb_test_service
+      changed_when: false
+
+    - name: Read Service NodePort
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - service
+          - "{{ alb_test_service_name }}"
+          - --namespace
+          - "{{ alb_test_namespace }}"
+          - -o
+          - jsonpath={.spec.ports[0].nodePort}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: alb_test_node_port_result
+      changed_when: false
+
+    - name: Save Service NodePort
+      ansible.builtin.set_fact:
+        alb_test_node_port: "{{ alb_test_node_port_result.stdout | trim }}"
+
+    - name: Wait for Service endpoints
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - endpointslice
+          - --namespace
+          - "{{ alb_test_namespace }}"
+          - --selector
+          - "kubernetes.io/service-name={{ alb_test_service_name }}"
+          - -o
+          - jsonpath={.items[*].endpoints[*].addresses[*]}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: alb_test_endpoint_addresses
+      changed_when: false
+      retries: 30
+      delay: 5
+      until:
+        - alb_test_endpoint_addresses.rc == 0
+        - alb_test_endpoint_addresses.stdout | trim | length > 0
+
+    - name: Wait for ALB address to be assigned
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - ingress
+          - "{{ alb_test_ingress_name }}"
+          - --namespace
+          - "{{ alb_test_namespace }}"
+          - -o
+          - jsonpath={.status.loadBalancer.ingress[0].hostname}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: alb_test_alb_hostname_result
+      changed_when: false
+      retries: 60
+      delay: 10
+      until:
+        - alb_test_alb_hostname_result.rc == 0
+        - alb_test_alb_hostname_result.stdout | trim | length > 0
+
+    - name: Save ALB hostname
+      ansible.builtin.set_fact:
+        alb_test_alb_hostname: >-
+          {{ alb_test_alb_hostname_result.stdout | trim }}
+
+    - name: Wait for TargetGroupBinding to be created
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - targetgroupbinding
+          - --namespace
+          - "{{ alb_test_namespace }}"
+          - -o
+          - jsonpath={.items[0].metadata.name}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: alb_test_tgb_name_result
+      changed_when: false
+      retries: 60
+      delay: 5
+      until:
+        - alb_test_tgb_name_result.rc == 0
+        - alb_test_tgb_name_result.stdout | trim | length > 0
+
+    - name: Save TargetGroupBinding name
+      ansible.builtin.set_fact:
+        alb_test_tgb_name: "{{ alb_test_tgb_name_result.stdout | trim }}"
+
+    - name: Read Target Group ARN
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - targetgroupbinding
+          - "{{ alb_test_tgb_name }}"
+          - --namespace
+          - "{{ alb_test_namespace }}"
+          - -o
+          - jsonpath={.spec.targetGroupARN}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: alb_test_target_group_arn_result
+      changed_when: false
+      retries: 30
+      delay: 5
+      until:
+        - alb_test_target_group_arn_result.rc == 0
+        - alb_test_target_group_arn_result.stdout | trim | length > 0
+
+    - name: Save Target Group ARN
+      ansible.builtin.set_fact:
+        alb_test_target_group_arn: >-
+          {{ alb_test_target_group_arn_result.stdout | trim }}
+
+    - name: Show TargetGroupBinding
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - targetgroupbinding
+          - "{{ alb_test_tgb_name }}"
+          - --namespace
+          - "{{ alb_test_namespace }}"
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: alb_test_tgb
+      changed_when: false
+
+    - name: Wait for targets to be registered
+      ansible.builtin.command:
+        argv:
+          - aws
+          - elbv2
+          - describe-target-health
+          - --region
+          - "{{ aws_region }}"
+          - --profile
+          - "{{ alb_test_aws_profile }}"
+          - --target-group-arn
+          - "{{ alb_test_target_group_arn }}"
+          - --query
+          - length(TargetHealthDescriptions)
+          - --output
+          - text
+      delegate_to: localhost
+      become: false
+      register: alb_test_registered_target_count
+      changed_when: false
+      failed_when: false
+      retries: 60
+      delay: 10
+      until:
+        - alb_test_registered_target_count.rc == 0
+        - alb_test_registered_target_count.stdout | int > 0
+
+    - name: Wait for registered targets to become healthy
+      ansible.builtin.command:
+        argv:
+          - aws
+          - elbv2
+          - describe-target-health
+          - --region
+          - "{{ aws_region }}"
+          - --profile
+          - "{{ alb_test_aws_profile }}"
+          - --target-group-arn
+          - "{{ alb_test_target_group_arn }}"
+          - --query
+          - >-
+            length(TargetHealthDescriptions[?TargetHealth.State!='healthy'])
+          - --output
+          - text
+      delegate_to: localhost
+      become: false
+      register: alb_test_unhealthy_target_count
+      changed_when: false
+      failed_when: false
+      retries: 60
+      delay: 10
+      until:
+        - alb_test_unhealthy_target_count.rc == 0
+        - alb_test_unhealthy_target_count.stdout | int == 0
+
+    - name: Read final Target Group health
+      ansible.builtin.command:
+        argv:
+          - aws
+          - elbv2
+          - describe-target-health
+          - --region
+          - "{{ aws_region }}"
+          - --profile
+          - "{{ alb_test_aws_profile }}"
+          - --target-group-arn
+          - "{{ alb_test_target_group_arn }}"
+          - --query
+          - >-
+            TargetHealthDescriptions[].{
+            InstanceId:Target.Id,
+            Port:Target.Port,
+            State:TargetHealth.State,
+            Reason:TargetHealth.Reason}
+          - --output
+          - json
+      delegate_to: localhost
+      become: false
+      register: alb_test_target_health
+      changed_when: false
+
+    - name: Wait for ALB DNS to resolve from local machine
+      ansible.builtin.command:
+        argv:
+          - nslookup
+          - "{{ alb_test_alb_hostname }}"
+      delegate_to: localhost
+      become: false
+      register: alb_test_dns_lookup
+      changed_when: false
+      failed_when: false
+      retries: 30
+      delay: 10
+      until:
+        - alb_test_dns_lookup.rc == 0
+
+    - name: Test ALB from local machine
+      ansible.builtin.uri:
+        url: "http://{{ alb_test_alb_hostname }}/"
+        method: GET
+        status_code: 200
+        return_content: true
+        timeout: 20
+      delegate_to: localhost
+      become: false
+      register: alb_test_external_result
+      changed_when: false
+      failed_when: false
+      retries: 30
+      delay: 10
+      until:
+        - alb_test_external_result.status is defined
+        - alb_test_external_result.status == 200
+
+    - name: Verify ALB response
+      ansible.builtin.assert:
+        that:
+          - alb_test_external_result.status is defined
+          - alb_test_external_result.status == 200
+          - >-
+            'Welcome to nginx!' in
+            (alb_test_external_result.content | default(''))
+        fail_msg: >-
+          ALB external HTTP test failed.
+          URL=http://{{ alb_test_alb_hostname }}/,
+          status={{
+            alb_test_external_result.status | default('unknown')
+          }}
+        success_msg: >-
+          ALB returned HTTP 200 and the nginx welcome page.
+
+    - name: Display ALB Ingress test result
+      ansible.builtin.debug:
+        msg:
+          - "Kubernetes nodes:"
+          - "{{ alb_test_nodes.stdout_lines }}"
+          - "Pods:"
+          - "{{ alb_test_pods.stdout_lines }}"
+          - "Service:"
+          - "{{ alb_test_service.stdout_lines }}"
+          - "NodePort: {{ alb_test_node_port }}"
+          - >-
+            Endpoints:
+            {{ alb_test_endpoint_addresses.stdout | trim }}
+          - "ALB DNS: {{ alb_test_alb_hostname }}"
+          - "TargetGroupBinding:"
+          - "{{ alb_test_tgb.stdout_lines }}"
+          - "Target Group ARN: {{ alb_test_target_group_arn }}"
+          - "Target health:"
+          - "{{ alb_test_target_health.stdout | from_json }}"
+          - >-
+            External URL:
+            http://{{ alb_test_alb_hostname }}/
+          - >-
+            HTTP status:
+            {{ alb_test_external_result.status }}
+
+    - name: Remove ALB test namespace
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - delete
+          - namespace
+          - "{{ alb_test_namespace }}"
+          - --ignore-not-found=true
+          - --wait=true
+          - --timeout=600s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      when: cleanup_after_test | bool
+      register: alb_test_namespace_delete
+      changed_when: >-
+        'deleted' in alb_test_namespace_delete.stdout
+
+    - name: Remove temporary ALB manifest
+      ansible.builtin.file:
+        path: "{{ alb_test_manifest_remote_path }}"
+        state: absent
