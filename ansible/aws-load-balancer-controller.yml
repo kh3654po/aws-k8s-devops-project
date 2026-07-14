@@ -1,0 +1,194 @@
+---
+- name: Install AWS Load Balancer Controller
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  tasks:
+    - name: Check Kubernetes administrator kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: aws_lbc_kubeconfig
+
+    - name: Fail when Kubernetes control plane is not initialized
+      ansible.builtin.assert:
+        that:
+          - aws_lbc_kubeconfig.stat.exists
+        fail_msg: >-
+          Kubernetes administrator kubeconfig was not found at
+          {{ kubeconfig_path }}.
+        success_msg: Kubernetes administrator kubeconfig was found.
+
+    - name: Apply AWS Load Balancer Controller CRDs
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - -f
+          - https://raw.githubusercontent.com/aws/eks-charts/master/stable/aws-load-balancer-controller/crds/crds.yaml
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: aws_lbc_crds
+      changed_when: >-
+        'created' in aws_lbc_crds.stdout or
+        'configured' in aws_lbc_crds.stdout
+
+    - name: Add AWS EKS Helm repository
+      ansible.builtin.command:
+        argv:
+          - "{{ helm_binary_path }}"
+          - repo
+          - add
+          - "{{ aws_load_balancer_controller_repository_name }}"
+          - "{{ aws_load_balancer_controller_repository_url }}"
+          - --force-update
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Update Helm repository cache
+      ansible.builtin.command:
+        argv:
+          - "{{ helm_binary_path }}"
+          - repo
+          - update
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Render AWS Load Balancer Controller Helm values
+      ansible.builtin.template:
+        src: aws-load-balancer-controller-values.yml.j2
+        dest: "{{ aws_load_balancer_controller_values_remote_path }}"
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Install or upgrade AWS Load Balancer Controller Helm release
+      ansible.builtin.command:
+        argv:
+          - "{{ helm_binary_path }}"
+          - upgrade
+          - --install
+          - "{{ aws_load_balancer_controller_release_name }}"
+          - "{{ aws_load_balancer_controller_chart }}"
+          - --namespace
+          - "{{ aws_load_balancer_controller_release_namespace }}"
+          - --version
+          - "{{ aws_load_balancer_controller_chart_version }}"
+          - --values
+          - "{{ aws_load_balancer_controller_values_remote_path }}"
+          - --skip-crds
+          - --timeout
+          - 10m0s
+          - --history-max
+          - "10"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: aws_lbc_helm
+      changed_when: >-
+        'deployed' in aws_lbc_helm.stdout or
+        'upgraded' in aws_lbc_helm.stdout
+
+    - name: Wait for AWS Load Balancer Controller rollout
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment/aws-load-balancer-controller
+          - --namespace
+          - "{{ aws_load_balancer_controller_release_namespace }}"
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Show AWS Load Balancer Controller deployment
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - deployment
+          - aws-load-balancer-controller
+          - --namespace
+          - "{{ aws_load_balancer_controller_release_namespace }}"
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: aws_lbc_deployment
+      changed_when: false
+
+    - name: Show AWS Load Balancer Controller pods
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pods
+          - --namespace
+          - "{{ aws_load_balancer_controller_release_namespace }}"
+          - -l
+          - app.kubernetes.io/name=aws-load-balancer-controller
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: aws_lbc_pods
+      changed_when: false
+
+    - name: Show AWS Load Balancer Controller service account
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - serviceaccount
+          - "{{ aws_load_balancer_controller_service_account_name }}"
+          - --namespace
+          - "{{ aws_load_balancer_controller_release_namespace }}"
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: aws_lbc_service_account
+      changed_when: false
+
+    - name: Show ALB IngressClass
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - ingressclass
+          - "{{ aws_load_balancer_controller_ingress_class }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: aws_lbc_ingress_class
+      changed_when: false
+      failed_when: false
+
+    - name: Show recent AWS Load Balancer Controller logs
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - logs
+          - deployment/aws-load-balancer-controller
+          - --namespace
+          - "{{ aws_load_balancer_controller_release_namespace }}"
+          - --tail=100
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: aws_lbc_logs
+      changed_when: false
+      failed_when: false
+
+    - name: Display AWS Load Balancer Controller installation result
+      ansible.builtin.debug:
+        msg:
+          - "{{ aws_lbc_deployment.stdout_lines }}"
+          - "{{ aws_lbc_pods.stdout_lines }}"
+          - "{{ aws_lbc_service_account.stdout_lines }}"
+          - "{{ aws_lbc_ingress_class.stdout_lines | default([]) }}"
+          - "{{ aws_lbc_logs.stdout_lines | default([]) }}"

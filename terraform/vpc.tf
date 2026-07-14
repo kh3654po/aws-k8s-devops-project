@@ -20,6 +20,17 @@ module "vpc" {
     "${var.prefix}-private-2",
   ]
 
+  # 퍼블릭 서브넷과 프라이빗 서브넷에 Kubernetes 클러스터 관련 태그를 추가하여, AWS Load Balancer Controller가 해당 서브넷을 인식하도록 설정
+  public_subnet_tags = {
+    "kubernetes.io/role/elb"                    = "1"
+    "kubernetes.io/cluster/${var.cluster_name}" = "shared"
+  }
+
+  private_subnet_tags = {
+    "kubernetes.io/role/internal-elb"           = "1"
+    "kubernetes.io/cluster/${var.cluster_name}" = "shared"
+  }
+
   # 각 가용 영역마다 NAT Gateway를 생성하여 고가용성을 확보
   enable_nat_gateway     = true
   single_nat_gateway     = false

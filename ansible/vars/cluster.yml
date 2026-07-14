@@ -83,3 +83,23 @@ ingress_nginx_class_name: nginx
 
 ingress_nginx_http_nodeport: 30081
 ingress_nginx_https_nodeport: 30443
+
+# AWS Load Balancer Controller
+aws_vpc_id: "vpc-009006771342abe30"
+
+aws_load_balancer_controller_repository_name: eks
+aws_load_balancer_controller_repository_url: https://aws.github.io/eks-charts
+
+aws_load_balancer_controller_chart: eks/aws-load-balancer-controller
+aws_load_balancer_controller_chart_version: "1.14.0"
+
+aws_load_balancer_controller_release_name: aws-load-balancer-controller
+aws_load_balancer_controller_release_namespace: kube-system
+
+aws_load_balancer_controller_service_account_name: aws-load-balancer-controller
+
+aws_load_balancer_controller_values_remote_path: /tmp/aws-load-balancer-controller-values.yml
+
+aws_load_balancer_controller_ingress_class: alb
+
+aws_load_balancer_controller_replicas: 1

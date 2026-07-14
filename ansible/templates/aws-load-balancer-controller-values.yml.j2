@@ -1,0 +1,39 @@
+---
+clusterName: "{{ cluster_name }}"
+
+region: "{{ aws_region }}"
+vpcId: "{{ aws_vpc_id }}"
+
+replicaCount: {{ aws_load_balancer_controller_replicas }}
+
+hostNetwork: true
+dnsPolicy: ClusterFirstWithHostNet
+
+serviceAccount:
+  create: true
+  name: "{{ aws_load_balancer_controller_service_account_name }}"
+
+ingressClass: "{{ aws_load_balancer_controller_ingress_class }}"
+createIngressClassResource: true
+
+defaultTargetType: instance
+
+nodeSelector:
+  node-role.kubernetes.io/control-plane: ""
+
+tolerations:
+  - key: node-role.kubernetes.io/control-plane
+    operator: Exists
+    effect: NoSchedule
+
+  - key: node-role.kubernetes.io/master
+    operator: Exists
+    effect: NoSchedule
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+  limits:
+    memory: 256Mi

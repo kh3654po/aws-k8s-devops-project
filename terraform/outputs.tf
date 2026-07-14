@@ -37,3 +37,7 @@ output "worker_asg_desired_capacity" {
 output "worker_asg_max_size" {
   value = aws_autoscaling_group.worker.max_size
 }
+
+output "vpc_id" {
+  value = module.vpc.vpc_id
+}

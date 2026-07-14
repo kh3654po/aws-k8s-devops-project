@@ -25,3 +25,6 @@
 
 - name: Install ingress-nginx Ingress Controller
   ansible.builtin.import_playbook: ingress-nginx.yml
+
+- name: Install AWS Load Balancer Controller
+  ansible.builtin.import_playbook: aws-load-balancer-controller.yml
