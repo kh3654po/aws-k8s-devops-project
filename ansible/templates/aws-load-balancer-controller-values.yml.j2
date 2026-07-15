@@ -18,6 +18,11 @@ createIngressClassResource: true
 
 defaultTargetType: instance
 
+controllerConfig:
+  featureGates:
+    ALBGatewayAPI: {{ aws_load_balancer_controller_alb_gateway_enabled | bool | lower }}
+    NLBGatewayAPI: {{ aws_load_balancer_controller_nlb_gateway_enabled | bool | lower }}
+
 nodeSelector:
   node-role.kubernetes.io/control-plane: ""
 
@@ -29,6 +34,12 @@ tolerations:
   - key: node-role.kubernetes.io/master
     operator: Exists
     effect: NoSchedule
+
+updateStrategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 1
+    maxSurge: 0
 
 resources:
   requests:

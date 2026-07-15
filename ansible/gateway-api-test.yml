@@ -1,0 +1,646 @@
+---
+- name: Configure Kubernetes node provider IDs
+  hosts: all
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  tasks:
+    - name: Request IMDSv2 token
+      ansible.builtin.uri:
+        url: http://169.254.169.254/latest/api/token
+        method: PUT
+        headers:
+          X-aws-ec2-metadata-token-ttl-seconds: "21600"
+        return_content: true
+        timeout: 5
+      register: gateway_test_imds_token
+      changed_when: false
+      no_log: true
+
+    - name: Read EC2 instance ID
+      ansible.builtin.uri:
+        url: http://169.254.169.254/latest/meta-data/instance-id
+        method: GET
+        headers:
+          X-aws-ec2-metadata-token: "{{ gateway_test_imds_token.content }}"
+        return_content: true
+        timeout: 5
+      register: gateway_test_instance_id_result
+      changed_when: false
+
+    - name: Read EC2 availability zone
+      ansible.builtin.uri:
+        url: http://169.254.169.254/latest/meta-data/placement/availability-zone
+        method: GET
+        headers:
+          X-aws-ec2-metadata-token: "{{ gateway_test_imds_token.content }}"
+        return_content: true
+        timeout: 5
+      register: gateway_test_availability_zone_result
+      changed_when: false
+
+    - name: Read Kubernetes node name
+      ansible.builtin.command:
+        argv:
+          - hostname
+      register: gateway_test_node_name_result
+      changed_when: false
+
+    - name: Save Kubernetes provider ID
+      ansible.builtin.set_fact:
+        gateway_test_node_name: "{{ gateway_test_node_name_result.stdout | trim }}"
+        gateway_test_provider_id: >-
+          aws:///{{ gateway_test_availability_zone_result.content | trim }}/{{ gateway_test_instance_id_result.content | trim }}
+
+    - name: Read current Kubernetes node provider ID
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - node
+          - "{{ gateway_test_node_name }}"
+          - -o
+          - jsonpath={.spec.providerID}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      delegate_to: "{{ groups['masters'][0] }}"
+      become: true
+      register: gateway_test_current_provider_id
+      changed_when: false
+
+    - name: Configure Kubernetes node provider ID
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - patch
+          - node
+          - "{{ gateway_test_node_name }}"
+          - --type=merge
+          - --patch
+          - >-
+            {"spec":{"providerID":"{{ gateway_test_provider_id }}"}}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      delegate_to: "{{ groups['masters'][0] }}"
+      become: true
+      when:
+        - gateway_test_current_provider_id.stdout | trim
+          != gateway_test_provider_id
+
+    - name: Verify Kubernetes node provider ID
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - node
+          - "{{ gateway_test_node_name }}"
+          - -o
+          - jsonpath={.spec.providerID}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      delegate_to: "{{ groups['masters'][0] }}"
+      become: true
+      register: gateway_test_verified_provider_id
+      changed_when: false
+      failed_when:
+        - gateway_test_verified_provider_id.stdout | trim
+          != gateway_test_provider_id
+
+- name: Test AWS Load Balancer Controller Gateway API
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  vars:
+    gateway_test_namespace: gateway-test
+
+    gateway_test_deployment_name: gateway-nginx-demo
+    gateway_test_service_name: gateway-nginx-demo
+    gateway_test_app_label: gateway-nginx-demo
+
+    gateway_test_gateway_class_name: aws-alb
+    gateway_test_gateway_name: gateway-nginx-demo
+    gateway_test_http_route_name: gateway-nginx-demo
+
+    gateway_test_load_balancer_configuration_name: gateway-nginx-alb
+    gateway_test_target_group_configuration_name: gateway-nginx-target-group
+
+    gateway_test_image: nginx:1.27-alpine
+    gateway_test_replicas: 2
+
+    gateway_test_manifest_remote_path: /tmp/gateway-api-demo.yml
+
+    gateway_test_aws_profile: default
+
+    cleanup_after_test: false
+
+  tasks:
+    - name: Check Kubernetes administrator kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: gateway_test_kubeconfig
+
+    - name: Fail when Kubernetes control plane is not initialized
+      ansible.builtin.assert:
+        that:
+          - gateway_test_kubeconfig.stat.exists
+        fail_msg: >-
+          Kubernetes administrator kubeconfig was not found at
+          {{ kubeconfig_path }}.
+        success_msg: Kubernetes administrator kubeconfig was found.
+
+    - name: Verify required Gateway API CRDs
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - crd
+          - "{{ item }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      loop:
+        - gatewayclasses.gateway.networking.k8s.io
+        - gateways.gateway.networking.k8s.io
+        - httproutes.gateway.networking.k8s.io
+        - loadbalancerconfigurations.gateway.k8s.aws
+        - targetgroupconfigurations.gateway.k8s.aws
+      changed_when: false
+
+    - name: Verify AWS Load Balancer Controller deployment
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - deployment
+          - aws-load-balancer-controller
+          - --namespace
+          - "{{ aws_load_balancer_controller_release_namespace }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Render Gateway API demo manifest
+      ansible.builtin.template:
+        src: gateway-api-demo.yml.j2
+        dest: "{{ gateway_test_manifest_remote_path }}"
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Apply Gateway API demo manifest
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - --filename
+          - "{{ gateway_test_manifest_remote_path }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: gateway_test_apply
+      changed_when: >-
+        'created' in gateway_test_apply.stdout or
+        'configured' in gateway_test_apply.stdout
+
+    - name: Wait for nginx deployment rollout
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - "deployment/{{ gateway_test_deployment_name }}"
+          - --namespace
+          - "{{ gateway_test_namespace }}"
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Wait for nginx Pods to become Ready
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - wait
+          - --for=condition=Ready
+          - pod
+          - --selector
+          - "app={{ gateway_test_app_label }}"
+          - --namespace
+          - "{{ gateway_test_namespace }}"
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Wait for GatewayClass to be accepted
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - gatewayclass
+          - "{{ gateway_test_gateway_class_name }}"
+          - -o
+          - jsonpath={.status.conditions[?(@.type=="Accepted")].status}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: gateway_test_gateway_class_accepted
+      changed_when: false
+      retries: 60
+      delay: 5
+      until:
+        - gateway_test_gateway_class_accepted.rc == 0
+        - gateway_test_gateway_class_accepted.stdout | trim == "True"
+
+    - name: Wait for Gateway to be programmed
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - gateway
+          - "{{ gateway_test_gateway_name }}"
+          - --namespace
+          - "{{ gateway_test_namespace }}"
+          - -o
+          - jsonpath={.status.conditions[?(@.type=="Programmed")].status}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: gateway_test_gateway_programmed
+      changed_when: false
+      retries: 90
+      delay: 10
+      until:
+        - gateway_test_gateway_programmed.rc == 0
+        - gateway_test_gateway_programmed.stdout | trim == "True"
+
+    - name: Wait for HTTPRoute to be accepted
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - httproute
+          - "{{ gateway_test_http_route_name }}"
+          - --namespace
+          - "{{ gateway_test_namespace }}"
+          - -o
+          - >-
+            jsonpath={.status.parents[0].conditions[?(@.type=="Accepted")].status}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: gateway_test_http_route_accepted
+      changed_when: false
+      retries: 60
+      delay: 5
+      until:
+        - gateway_test_http_route_accepted.rc == 0
+        - gateway_test_http_route_accepted.stdout | trim == "True"
+
+    - name: Wait for HTTPRoute references to be resolved
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - httproute
+          - "{{ gateway_test_http_route_name }}"
+          - --namespace
+          - "{{ gateway_test_namespace }}"
+          - -o
+          - >-
+            jsonpath={.status.parents[0].conditions[?(@.type=="ResolvedRefs")].status}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: gateway_test_http_route_resolved
+      changed_when: false
+      retries: 60
+      delay: 5
+      until:
+        - gateway_test_http_route_resolved.rc == 0
+        - gateway_test_http_route_resolved.stdout | trim == "True"
+
+    - name: Read Gateway ALB hostname
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - gateway
+          - "{{ gateway_test_gateway_name }}"
+          - --namespace
+          - "{{ gateway_test_namespace }}"
+          - -o
+          - jsonpath={.status.addresses[0].value}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: gateway_test_alb_hostname_result
+      changed_when: false
+      retries: 60
+      delay: 10
+      until:
+        - gateway_test_alb_hostname_result.rc == 0
+        - gateway_test_alb_hostname_result.stdout | trim | length > 0
+
+    - name: Save Gateway ALB hostname
+      ansible.builtin.set_fact:
+        gateway_test_alb_hostname: >-
+          {{ gateway_test_alb_hostname_result.stdout | trim }}
+
+    - name: Wait for TargetGroupBinding
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - targetgroupbinding
+          - --namespace
+          - "{{ gateway_test_namespace }}"
+          - -o
+          - jsonpath={.items[0].metadata.name}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: gateway_test_tgb_name_result
+      changed_when: false
+      retries: 60
+      delay: 5
+      until:
+        - gateway_test_tgb_name_result.rc == 0
+        - gateway_test_tgb_name_result.stdout | trim | length > 0
+
+    - name: Save TargetGroupBinding name
+      ansible.builtin.set_fact:
+        gateway_test_tgb_name: "{{ gateway_test_tgb_name_result.stdout | trim }}"
+
+    - name: Read Target Group ARN
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - targetgroupbinding
+          - "{{ gateway_test_tgb_name }}"
+          - --namespace
+          - "{{ gateway_test_namespace }}"
+          - -o
+          - jsonpath={.spec.targetGroupARN}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: gateway_test_target_group_arn_result
+      changed_when: false
+      retries: 30
+      delay: 5
+      until:
+        - gateway_test_target_group_arn_result.rc == 0
+        - gateway_test_target_group_arn_result.stdout | trim | length > 0
+
+    - name: Save Target Group ARN
+      ansible.builtin.set_fact:
+        gateway_test_target_group_arn: >-
+          {{ gateway_test_target_group_arn_result.stdout | trim }}
+
+    - name: Wait for targets to be registered
+      ansible.builtin.command:
+        argv:
+          - aws
+          - elbv2
+          - describe-target-health
+          - --region
+          - "{{ aws_region }}"
+          - --profile
+          - "{{ gateway_test_aws_profile }}"
+          - --target-group-arn
+          - "{{ gateway_test_target_group_arn }}"
+          - --query
+          - length(TargetHealthDescriptions)
+          - --output
+          - text
+      delegate_to: localhost
+      become: false
+      register: gateway_test_registered_target_count
+      changed_when: false
+      failed_when: false
+      retries: 60
+      delay: 10
+      until:
+        - gateway_test_registered_target_count.rc == 0
+        - gateway_test_registered_target_count.stdout | int > 0
+
+    - name: Wait for all targets to become healthy
+      ansible.builtin.command:
+        argv:
+          - aws
+          - elbv2
+          - describe-target-health
+          - --region
+          - "{{ aws_region }}"
+          - --profile
+          - "{{ gateway_test_aws_profile }}"
+          - --target-group-arn
+          - "{{ gateway_test_target_group_arn }}"
+          - --query
+          - >-
+            length(TargetHealthDescriptions[?TargetHealth.State!='healthy'])
+          - --output
+          - text
+      delegate_to: localhost
+      become: false
+      register: gateway_test_unhealthy_target_count
+      changed_when: false
+      failed_when: false
+      retries: 60
+      delay: 10
+      until:
+        - gateway_test_unhealthy_target_count.rc == 0
+        - gateway_test_unhealthy_target_count.stdout | int == 0
+
+    - name: Read final Target Group health
+      ansible.builtin.command:
+        argv:
+          - aws
+          - elbv2
+          - describe-target-health
+          - --region
+          - "{{ aws_region }}"
+          - --profile
+          - "{{ gateway_test_aws_profile }}"
+          - --target-group-arn
+          - "{{ gateway_test_target_group_arn }}"
+          - --query
+          - >-
+            TargetHealthDescriptions[].{
+            InstanceId:Target.Id,
+            Port:Target.Port,
+            State:TargetHealth.State,
+            Reason:TargetHealth.Reason}
+          - --output
+          - json
+      delegate_to: localhost
+      become: false
+      register: gateway_test_target_health
+      changed_when: false
+
+    - name: Wait for Gateway ALB DNS to resolve
+      ansible.builtin.command:
+        argv:
+          - nslookup
+          - "{{ gateway_test_alb_hostname }}"
+      delegate_to: localhost
+      become: false
+      register: gateway_test_dns_lookup
+      changed_when: false
+      failed_when: false
+      retries: 30
+      delay: 10
+      until:
+        - gateway_test_dns_lookup.rc == 0
+
+    - name: Test Gateway ALB from local machine
+      ansible.builtin.uri:
+        url: "http://{{ gateway_test_alb_hostname }}/"
+        method: GET
+        status_code: 200
+        return_content: true
+        timeout: 20
+      delegate_to: localhost
+      become: false
+      register: gateway_test_external_result
+      changed_when: false
+      failed_when: false
+      retries: 30
+      delay: 10
+      until:
+        - gateway_test_external_result.status is defined
+        - gateway_test_external_result.status == 200
+
+    - name: Verify Gateway ALB response
+      ansible.builtin.assert:
+        that:
+          - gateway_test_external_result.status is defined
+          - gateway_test_external_result.status == 200
+          - >-
+            'Welcome to nginx!' in
+            (gateway_test_external_result.content | default(''))
+        fail_msg: >-
+          Gateway API ALB HTTP test failed.
+          URL=http://{{ gateway_test_alb_hostname }}/,
+          status={{
+            gateway_test_external_result.status | default('unknown')
+          }}
+        success_msg: >-
+          Gateway API ALB returned HTTP 200 and the nginx welcome page.
+
+    - name: Show GatewayClass
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - gatewayclass
+          - "{{ gateway_test_gateway_class_name }}"
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: gateway_test_gateway_class
+      changed_when: false
+
+    - name: Show Gateway
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - gateway
+          - "{{ gateway_test_gateway_name }}"
+          - --namespace
+          - "{{ gateway_test_namespace }}"
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: gateway_test_gateway
+      changed_when: false
+
+    - name: Show HTTPRoute
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - httproute
+          - "{{ gateway_test_http_route_name }}"
+          - --namespace
+          - "{{ gateway_test_namespace }}"
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: gateway_test_http_route
+      changed_when: false
+
+    - name: Show application resources
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pods,service,endpointslice
+          - --namespace
+          - "{{ gateway_test_namespace }}"
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: gateway_test_application_resources
+      changed_when: false
+
+    - name: Display Gateway API test result
+      ansible.builtin.debug:
+        msg:
+          - "GatewayClass:"
+          - "{{ gateway_test_gateway_class.stdout_lines }}"
+          - "Gateway:"
+          - "{{ gateway_test_gateway.stdout_lines }}"
+          - "HTTPRoute:"
+          - "{{ gateway_test_http_route.stdout_lines }}"
+          - "Application resources:"
+          - "{{ gateway_test_application_resources.stdout_lines }}"
+          - "ALB DNS: {{ gateway_test_alb_hostname }}"
+          - "TargetGroupBinding: {{ gateway_test_tgb_name }}"
+          - "Target Group ARN: {{ gateway_test_target_group_arn }}"
+          - "Target health:"
+          - "{{ gateway_test_target_health.stdout | from_json }}"
+          - "External URL: http://{{ gateway_test_alb_hostname }}/"
+          - "HTTP status: {{ gateway_test_external_result.status }}"
+
+    - name: Remove Gateway API test namespace
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - delete
+          - namespace
+          - "{{ gateway_test_namespace }}"
+          - --ignore-not-found=true
+          - --wait=true
+          - --timeout=600s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      when: cleanup_after_test | bool
+      register: gateway_test_namespace_delete
+      changed_when: >-
+        'deleted' in gateway_test_namespace_delete.stdout
+
+    - name: Remove GatewayClass
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - delete
+          - gatewayclass
+          - "{{ gateway_test_gateway_class_name }}"
+          - --ignore-not-found=true
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      when: cleanup_after_test | bool
+      register: gateway_test_gateway_class_delete
+      changed_when: >-
+        'deleted' in gateway_test_gateway_class_delete.stdout
+
+    - name: Remove temporary Gateway API manifest
+      ansible.builtin.file:
+        path: "{{ gateway_test_manifest_remote_path }}"
+        state: absent

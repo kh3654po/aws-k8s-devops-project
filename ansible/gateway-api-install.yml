@@ -1,0 +1,100 @@
+---
+- name: Install Gateway API resources
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  tasks:
+    - name: Check Kubernetes administrator kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: gateway_api_kubeconfig
+
+    - name: Fail when Kubernetes control plane is not initialized
+      ansible.builtin.assert:
+        that:
+          - gateway_api_kubeconfig.stat.exists
+        fail_msg: >-
+          Kubernetes administrator kubeconfig was not found at
+          {{ kubeconfig_path }}.
+
+    - name: Install Gateway API Standard CRDs
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - --server-side=true
+          - --filename
+          - "{{ gateway_api_standard_crds_url }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: gateway_api_standard_crds
+      changed_when: >-
+        'created' in gateway_api_standard_crds.stdout or
+        'configured' in gateway_api_standard_crds.stdout or
+        'serverside-applied' in gateway_api_standard_crds.stdout
+
+    - name: Install AWS Load Balancer Controller Gateway CRDs
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - --server-side=true
+          - --filename
+          - "{{ aws_load_balancer_controller_gateway_crds_url }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: gateway_api_aws_crds
+      changed_when: >-
+        'created' in gateway_api_aws_crds.stdout or
+        'configured' in gateway_api_aws_crds.stdout or
+        'serverside-applied' in gateway_api_aws_crds.stdout
+
+    - name: Wait for required Gateway API CRDs
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - wait
+          - --for=condition=Established
+          - "crd/{{ item }}"
+          - --timeout=180s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      loop:
+        - gatewayclasses.gateway.networking.k8s.io
+        - gateways.gateway.networking.k8s.io
+        - httproutes.gateway.networking.k8s.io
+        - loadbalancerconfigurations.gateway.k8s.aws
+        - targetgroupconfigurations.gateway.k8s.aws
+      changed_when: false
+
+    - name: Show Gateway API resources
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - api-resources
+          - --api-group=gateway.networking.k8s.io
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: gateway_api_resources
+      changed_when: false
+
+    - name: Show AWS Gateway API resources
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - api-resources
+          - --api-group=gateway.k8s.aws
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: gateway_api_aws_resources
+      changed_when: false
+
+    - name: Display Gateway API installation result
+      ansible.builtin.debug:
+        msg:
+          - "{{ gateway_api_resources.stdout_lines }}"
+          - "{{ gateway_api_aws_resources.stdout_lines }}"

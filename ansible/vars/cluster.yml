@@ -85,7 +85,7 @@ ingress_nginx_http_nodeport: 30081
 ingress_nginx_https_nodeport: 30443
 
 # AWS Load Balancer Controller
-aws_vpc_id: "vpc-009006771342abe30"
+aws_vpc_id: "vpc-083b4d3d26b4e3de0"
 
 aws_load_balancer_controller_repository_name: eks
 aws_load_balancer_controller_repository_url: https://aws.github.io/eks-charts
@@ -103,3 +103,15 @@ aws_load_balancer_controller_values_remote_path: /tmp/aws-load-balancer-controll
 aws_load_balancer_controller_ingress_class: alb
 
 aws_load_balancer_controller_replicas: 1
+
+# Gateway API
+gateway_api_version: "v1.5.0"
+
+gateway_api_standard_crds_url: >-
+  https://github.com/kubernetes-sigs/gateway-api/releases/download/{{ gateway_api_version }}/standard-install.yaml
+
+aws_load_balancer_controller_gateway_crds_url: >-
+  https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v2.14.0/config/crd/gateway/gateway-crds.yaml
+
+aws_load_balancer_controller_alb_gateway_enabled: true
+aws_load_balancer_controller_nlb_gateway_enabled: false
