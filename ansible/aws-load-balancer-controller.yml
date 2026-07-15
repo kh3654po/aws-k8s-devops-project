@@ -93,19 +93,65 @@
         'deployed' in aws_lbc_helm.stdout or
         'upgraded' in aws_lbc_helm.stdout
 
-    - name: Wait for AWS Load Balancer Controller rollout
+    - name: Wait for AWS Load Balancer Controller deployment to become ready
       ansible.builtin.command:
         argv:
           - kubectl
-          - rollout
-          - status
-          - deployment/aws-load-balancer-controller
+          - get
+          - deployment
+          - aws-load-balancer-controller
           - --namespace
           - "{{ aws_load_balancer_controller_release_namespace }}"
-          - --timeout=300s
+          - -o
+          - json
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
+      register: aws_lbc_deployment_status
       changed_when: false
+      retries: 60
+      delay: 5
+      until:
+        - aws_lbc_deployment_status.rc == 0
+        - >-
+          (
+            (aws_lbc_deployment_status.stdout | from_json)
+            .status.observedGeneration | default(0) | int
+          )
+          ==
+          (
+            (aws_lbc_deployment_status.stdout | from_json)
+            .metadata.generation | int
+          )
+        - >-
+          (
+            (aws_lbc_deployment_status.stdout | from_json)
+            .status.updatedReplicas | default(0) | int
+          )
+          ==
+          (
+            (aws_lbc_deployment_status.stdout | from_json)
+            .spec.replicas | default(1) | int
+          )
+        - >-
+          (
+            (aws_lbc_deployment_status.stdout | from_json)
+            .status.readyReplicas | default(0) | int
+          )
+          ==
+          (
+            (aws_lbc_deployment_status.stdout | from_json)
+            .spec.replicas | default(1) | int
+          )
+        - >-
+          (
+            (aws_lbc_deployment_status.stdout | from_json)
+            .status.availableReplicas | default(0) | int
+          )
+          ==
+          (
+            (aws_lbc_deployment_status.stdout | from_json)
+            .spec.replicas | default(1) | int
+          )
 
     - name: Show AWS Load Balancer Controller deployment
       ansible.builtin.command:
