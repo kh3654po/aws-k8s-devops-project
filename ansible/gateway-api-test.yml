@@ -1,114 +1,4 @@
 ---
-- name: Configure Kubernetes node provider IDs
-  hosts: all
-  become: true
-  gather_facts: false
-
-  vars_files:
-    - vars/cluster.yml
-
-  tasks:
-    - name: Request IMDSv2 token
-      ansible.builtin.uri:
-        url: http://169.254.169.254/latest/api/token
-        method: PUT
-        headers:
-          X-aws-ec2-metadata-token-ttl-seconds: "21600"
-        return_content: true
-        timeout: 5
-      register: gateway_test_imds_token
-      changed_when: false
-      no_log: true
-
-    - name: Read EC2 instance ID
-      ansible.builtin.uri:
-        url: http://169.254.169.254/latest/meta-data/instance-id
-        method: GET
-        headers:
-          X-aws-ec2-metadata-token: "{{ gateway_test_imds_token.content }}"
-        return_content: true
-        timeout: 5
-      register: gateway_test_instance_id_result
-      changed_when: false
-
-    - name: Read EC2 availability zone
-      ansible.builtin.uri:
-        url: http://169.254.169.254/latest/meta-data/placement/availability-zone
-        method: GET
-        headers:
-          X-aws-ec2-metadata-token: "{{ gateway_test_imds_token.content }}"
-        return_content: true
-        timeout: 5
-      register: gateway_test_availability_zone_result
-      changed_when: false
-
-    - name: Read Kubernetes node name
-      ansible.builtin.command:
-        argv:
-          - hostname
-      register: gateway_test_node_name_result
-      changed_when: false
-
-    - name: Save Kubernetes provider ID
-      ansible.builtin.set_fact:
-        gateway_test_node_name: "{{ gateway_test_node_name_result.stdout | trim }}"
-        gateway_test_provider_id: >-
-          aws:///{{ gateway_test_availability_zone_result.content | trim }}/{{ gateway_test_instance_id_result.content | trim }}
-
-    - name: Read current Kubernetes node provider ID
-      ansible.builtin.command:
-        argv:
-          - kubectl
-          - get
-          - node
-          - "{{ gateway_test_node_name }}"
-          - -o
-          - jsonpath={.spec.providerID}
-      environment:
-        KUBECONFIG: "{{ kubeconfig_path }}"
-      delegate_to: "{{ groups['masters'][0] }}"
-      become: true
-      register: gateway_test_current_provider_id
-      changed_when: false
-
-    - name: Configure Kubernetes node provider ID
-      ansible.builtin.command:
-        argv:
-          - kubectl
-          - patch
-          - node
-          - "{{ gateway_test_node_name }}"
-          - --type=merge
-          - --patch
-          - >-
-            {"spec":{"providerID":"{{ gateway_test_provider_id }}"}}
-      environment:
-        KUBECONFIG: "{{ kubeconfig_path }}"
-      delegate_to: "{{ groups['masters'][0] }}"
-      become: true
-      when:
-        - gateway_test_current_provider_id.stdout | trim
-          != gateway_test_provider_id
-
-    - name: Verify Kubernetes node provider ID
-      ansible.builtin.command:
-        argv:
-          - kubectl
-          - get
-          - node
-          - "{{ gateway_test_node_name }}"
-          - -o
-          - jsonpath={.spec.providerID}
-      environment:
-        KUBECONFIG: "{{ kubeconfig_path }}"
-      delegate_to: "{{ groups['masters'][0] }}"
-      become: true
-      register: gateway_test_verified_provider_id
-      changed_when: false
-      failed_when:
-        - gateway_test_verified_provider_id.stdout | trim
-          != gateway_test_provider_id
-
 - name: Test AWS Load Balancer Controller Gateway API
   hosts: masters
   become: true
@@ -154,6 +44,55 @@
           Kubernetes administrator kubeconfig was not found at
           {{ kubeconfig_path }}.
         success_msg: Kubernetes administrator kubeconfig was found.
+
+    - name: Read Kubernetes nodes for AWS provider ID validation
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - nodes
+          - -o
+          - json
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: gateway_test_kubernetes_nodes
+      changed_when: false
+
+    - name: Verify AWS provider ID for every Kubernetes node
+      ansible.builtin.assert:
+        that:
+          - item.spec.providerID is defined
+          - item.spec.providerID | length > 0
+          - >-
+            item.spec.providerID
+            is match('^aws:///[a-z0-9-]+/i-[a-f0-9]+$')
+        fail_msg: >-
+          Kubernetes node {{ item.metadata.name }} does not have a valid
+          AWS providerID. Run configure-node-provider-id.yml before
+          executing the Gateway API test.
+        success_msg: >-
+          Kubernetes node {{ item.metadata.name }} has a valid
+          AWS providerID: {{ item.spec.providerID }}
+      loop: "{{ (gateway_test_kubernetes_nodes.stdout | from_json).items }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+
+    - name: Show Kubernetes nodes with AWS provider IDs
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - nodes
+          - -o
+          - custom-columns=NAME:.metadata.name,PROVIDER_ID:.spec.providerID
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: gateway_test_node_provider_ids
+      changed_when: false
+
+    - name: Display Kubernetes node provider IDs
+      ansible.builtin.debug:
+        var: gateway_test_node_provider_ids.stdout_lines
 
     - name: Verify required Gateway API CRDs
       ansible.builtin.command:

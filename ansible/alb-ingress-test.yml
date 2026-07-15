@@ -1,57 +1,4 @@
 ---
-- name: Collect AWS instance information from Kubernetes nodes
-  hosts: "masters:workers"
-  become: false
-  gather_facts: false
-
-  tasks:
-    - name: Request EC2 IMDSv2 token
-      ansible.builtin.uri:
-        url: http://169.254.169.254/latest/api/token
-        method: PUT
-        headers:
-          X-aws-ec2-metadata-token-ttl-seconds: "21600"
-        status_code: 200
-        return_content: true
-        timeout: 5
-        use_proxy: false
-      register: alb_test_imds_token
-      changed_when: false
-      no_log: true
-
-    - name: Read EC2 instance identity document
-      ansible.builtin.uri:
-        url: >-
-          http://169.254.169.254/latest/dynamic/instance-identity/document
-        method: GET
-        headers:
-          X-aws-ec2-metadata-token: "{{ alb_test_imds_token.content }}"
-        status_code: 200
-        return_content: true
-        timeout: 5
-        use_proxy: false
-      register: alb_test_instance_identity
-      changed_when: false
-
-    - name: Read Kubernetes node name
-      ansible.builtin.command:
-        argv:
-          - hostname
-      register: alb_test_hostname
-      changed_when: false
-
-    - name: Save AWS node information
-      ansible.builtin.set_fact:
-        alb_test_node_name: "{{ alb_test_hostname.stdout | trim }}"
-        alb_test_instance_id: >-
-          {{
-            (alb_test_instance_identity.content | from_json).instanceId
-          }}
-        alb_test_availability_zone: >-
-          {{
-            (alb_test_instance_identity.content | from_json).availabilityZone
-          }}
-
 - name: Configure and test AWS ALB Ingress
   hosts: masters
   become: true
@@ -77,17 +24,6 @@
 
     cleanup_after_test: false
 
-    alb_test_node_hosts: >-
-      {{
-        (
-          groups['masters'] | default([])
-        )
-        +
-        (
-          groups['workers'] | default([])
-        )
-      }}
-
   tasks:
     - name: Check Kubernetes administrator kubeconfig
       ansible.builtin.stat:
@@ -103,66 +39,39 @@
           {{ kubeconfig_path }}.
         success_msg: Kubernetes administrator kubeconfig was found.
 
-    - name: Validate AWS node information
-      ansible.builtin.assert:
-        that:
-          - hostvars[item].alb_test_node_name is defined
-          - hostvars[item].alb_test_node_name | length > 0
-          - hostvars[item].alb_test_instance_id is defined
-          - hostvars[item].alb_test_instance_id is match('^i-[a-z0-9]+$')
-          - hostvars[item].alb_test_availability_zone is defined
-          - hostvars[item].alb_test_availability_zone | length > 0
-        fail_msg: >-
-          AWS instance information could not be collected from
-          inventory host {{ item }}.
-      loop: "{{ alb_test_node_hosts | unique }}"
-      loop_control:
-        label: "{{ item }}"
-
-    - name: Configure AWS providerID on Kubernetes nodes
-      ansible.builtin.command:
-        argv:
-          - kubectl
-          - patch
-          - node
-          - "{{ hostvars[item].alb_test_node_name }}"
-          - --type=merge
-          - --patch
-          - >-
-            {"spec":{"providerID":"aws:///{{ hostvars[item].alb_test_availability_zone }}/{{ hostvars[item].alb_test_instance_id }}"}}
-      environment:
-        KUBECONFIG: "{{ kubeconfig_path }}"
-      loop: "{{ alb_test_node_hosts | unique }}"
-      loop_control:
-        label: "{{ hostvars[item].alb_test_node_name }}"
-      register: alb_test_provider_id_patch
-      changed_when: >-
-        'no change' not in alb_test_provider_id_patch.stdout
-
-    - name: Verify AWS providerID on Kubernetes nodes
+    - name: Read Kubernetes nodes for AWS provider ID validation
       ansible.builtin.command:
         argv:
           - kubectl
           - get
-          - node
-          - "{{ hostvars[item].alb_test_node_name }}"
+          - nodes
           - -o
-          - jsonpath={.spec.providerID}
+          - json
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
-      loop: "{{ alb_test_node_hosts | unique }}"
-      loop_control:
-        label: "{{ hostvars[item].alb_test_node_name }}"
-      register: alb_test_provider_id_verify
+      register: alb_test_kubernetes_nodes
       changed_when: false
-      failed_when: >-
-        alb_test_provider_id_verify.stdout | trim !=
-        'aws:///' ~
-        hostvars[item].alb_test_availability_zone ~
-        '/' ~
-        hostvars[item].alb_test_instance_id
 
-    - name: Show Kubernetes nodes with AWS providerID
+    - name: Verify AWS provider ID for every Kubernetes node
+      ansible.builtin.assert:
+        that:
+          - item.spec.providerID is defined
+          - item.spec.providerID | length > 0
+          - >-
+            item.spec.providerID
+            is match('^aws:///[a-z0-9-]+/i-[a-f0-9]+$')
+        fail_msg: >-
+          Kubernetes node {{ item.metadata.name }} does not have a valid
+          AWS providerID. Run configure-node-provider-id.yml before
+          executing the ALB Ingress test.
+        success_msg: >-
+          Kubernetes node {{ item.metadata.name }} has a valid
+          AWS providerID: {{ item.spec.providerID }}
+      loop: "{{ (alb_test_kubernetes_nodes.stdout | from_json)['items'] }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+
+    - name: Show Kubernetes nodes with AWS provider IDs
       ansible.builtin.command:
         argv:
           - kubectl
@@ -172,8 +81,12 @@
           - custom-columns=NAME:.metadata.name,PROVIDER_ID:.spec.providerID
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
-      register: alb_test_nodes
+      register: alb_test_node_provider_ids
       changed_when: false
+
+    - name: Display Kubernetes node provider IDs
+      ansible.builtin.debug:
+        var: alb_test_node_provider_ids.stdout_lines
 
     - name: Verify AWS Load Balancer Controller deployment
       ansible.builtin.command:

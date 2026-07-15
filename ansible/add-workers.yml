@@ -1,6 +1,6 @@
 ---
 - name: Configure common prerequisites on new worker nodes
-  import_playbook: common.yml
+  ansible.builtin.import_playbook: common.yml
 
 - name: Join new worker nodes to Kubernetes cluster
   hosts: workers
@@ -17,14 +17,20 @@
       register: kubelet_conf
 
     - name: Generate fresh kubeadm join command on control plane
-      ansible.builtin.command: kubeadm token create --print-join-command
+      ansible.builtin.command:
+        argv:
+          - kubeadm
+          - token
+          - create
+          - --print-join-command
       delegate_to: "{{ groups['masters'][0] }}"
       run_once: true
       register: kubeadm_join_command
       changed_when: false
 
     - name: Join worker node to Kubernetes cluster
-      ansible.builtin.command: "{{ kubeadm_join_command.stdout }}"
+      ansible.builtin.command:
+        cmd: "{{ kubeadm_join_command.stdout }}"
       when: not kubelet_conf.stat.exists
       register: kubeadm_join_result
 
@@ -35,22 +41,32 @@
         state: started
 
     - name: Wait for worker node to become Ready
-      ansible.builtin.command: >
-        kubectl wait
-        --for=condition=Ready
-        node/{{ ansible_facts["hostname"] }}
-        --timeout=300s
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - wait
+          - --for=condition=Ready
+          - "node/{{ ansible_facts['hostname'] }}"
+          - --timeout=300s
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
       delegate_to: "{{ groups['masters'][0] }}"
       changed_when: false
 
+    - name: Configure AWS provider ID for joined worker
+      ansible.builtin.include_tasks:
+        file: tasks/configure-node-provider-id.yml
+
     - name: Wait for Calico DaemonSet rollout
-      ansible.builtin.command: >
-        kubectl rollout status
-        daemonset/calico-node
-        -n calico-system
-        --timeout=300s
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - daemonset/calico-node
+          - --namespace
+          - calico-system
+          - --timeout=300s
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
       delegate_to: "{{ groups['masters'][0] }}"
@@ -58,11 +74,15 @@
       changed_when: false
 
     - name: Wait for kube-proxy DaemonSet rollout
-      ansible.builtin.command: >
-        kubectl rollout status
-        daemonset/kube-proxy
-        -n kube-system
-        --timeout=300s
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - daemonset/kube-proxy
+          - --namespace
+          - kube-system
+          - --timeout=300s
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
       delegate_to: "{{ groups['masters'][0] }}"
@@ -70,7 +90,13 @@
       changed_when: false
 
     - name: Get Kubernetes node status
-      ansible.builtin.command: kubectl get nodes -o wide
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - nodes
+          - -o
+          - wide
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
       delegate_to: "{{ groups['masters'][0] }}"
@@ -78,7 +104,27 @@
       register: kubernetes_nodes
       changed_when: false
 
+    - name: Get Kubernetes node provider IDs
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - nodes
+          - -o
+          - custom-columns=NAME:.metadata.name,PROVIDER_ID:.spec.providerID
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      delegate_to: "{{ groups['masters'][0] }}"
+      run_once: true
+      register: kubernetes_node_provider_ids
+      changed_when: false
+
     - name: Show Kubernetes node status
       ansible.builtin.debug:
         msg: "{{ kubernetes_nodes.stdout_lines }}"
+      run_once: true
+
+    - name: Show Kubernetes node provider IDs
+      ansible.builtin.debug:
+        msg: "{{ kubernetes_node_provider_ids.stdout_lines }}"
       run_once: true

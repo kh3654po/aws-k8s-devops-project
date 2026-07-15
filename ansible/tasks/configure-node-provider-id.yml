@@ -1,0 +1,123 @@
+---
+- name: Request IMDSv2 token
+  ansible.builtin.uri:
+    url: http://169.254.169.254/latest/api/token
+    method: PUT
+    headers:
+      X-aws-ec2-metadata-token-ttl-seconds: "21600"
+    return_content: true
+    timeout: 5
+  register: node_provider_id_imds_token
+  changed_when: false
+  no_log: true
+
+- name: Read EC2 instance identity document
+  ansible.builtin.uri:
+    url: http://169.254.169.254/latest/dynamic/instance-identity/document
+    method: GET
+    headers:
+      X-aws-ec2-metadata-token: "{{ node_provider_id_imds_token.content }}"
+    return_content: true
+    timeout: 5
+  register: node_provider_id_instance_identity
+  changed_when: false
+
+- name: Read local Kubernetes node name
+  ansible.builtin.command:
+    argv:
+      - hostname
+      - -s
+  register: node_provider_id_hostname
+  changed_when: false
+
+- name: Build AWS Kubernetes provider ID
+  ansible.builtin.set_fact:
+    kubernetes_node_name: >-
+      {{ node_provider_id_hostname.stdout | trim }}
+
+    kubernetes_node_provider_id: >-
+      aws:///{{ (node_provider_id_instance_identity.content | from_json).availabilityZone }}/{{ (node_provider_id_instance_identity.content | from_json).instanceId }}
+
+- name: Wait for Kubernetes node registration
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - get
+      - node
+      - "{{ kubernetes_node_name }}"
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  delegate_to: "{{ groups['masters'][0] }}"
+  become: true
+  register: node_provider_id_node_registration
+  changed_when: false
+  retries: 60
+  delay: 5
+  until: node_provider_id_node_registration.rc == 0
+
+- name: Read current Kubernetes node provider ID
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - get
+      - node
+      - "{{ kubernetes_node_name }}"
+      - -o
+      - jsonpath={.spec.providerID}
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  delegate_to: "{{ groups['masters'][0] }}"
+  become: true
+  register: node_provider_id_current
+  changed_when: false
+
+- name: Configure Kubernetes node provider ID
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - patch
+      - node
+      - "{{ kubernetes_node_name }}"
+      - --type=merge
+      - --patch
+      - >-
+        {"spec":{"providerID":"{{ kubernetes_node_provider_id }}"}}
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  delegate_to: "{{ groups['masters'][0] }}"
+  become: true
+  register: node_provider_id_patch
+  when:
+    - node_provider_id_current.stdout | trim
+      != kubernetes_node_provider_id
+  changed_when:
+    - node_provider_id_patch.rc == 0
+    - >-
+      'patched' in node_provider_id_patch.stdout or
+      'configured' in node_provider_id_patch.stdout
+
+- name: Verify Kubernetes node provider ID
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - get
+      - node
+      - "{{ kubernetes_node_name }}"
+      - -o
+      - jsonpath={.spec.providerID}
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  delegate_to: "{{ groups['masters'][0] }}"
+  become: true
+  register: node_provider_id_verified
+  changed_when: false
+  failed_when:
+    - >-
+      node_provider_id_verified.stdout | trim
+      != kubernetes_node_provider_id
+
+- name: Display Kubernetes node provider ID
+  ansible.builtin.debug:
+    msg:
+      - "Node: {{ kubernetes_node_name }}"
+      - "Provider ID: {{ node_provider_id_verified.stdout | trim }}"
