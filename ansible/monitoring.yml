@@ -1,0 +1,340 @@
+---
+- name: Install Kubernetes monitoring stack
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  tasks:
+    - name: Check Kubernetes administrator kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: monitoring_kubeconfig
+
+    - name: Fail when Kubernetes control plane is not initialized
+      ansible.builtin.assert:
+        that:
+          - monitoring_kubeconfig.stat.exists
+        fail_msg: >-
+          Kubernetes administrator kubeconfig was not found at
+          {{ kubeconfig_path }}.
+        success_msg: Kubernetes administrator kubeconfig was found.
+
+    - name: Check Helm installation
+      ansible.builtin.command:
+        argv:
+          - helm
+          - version
+          - --short
+      register: monitoring_helm_version
+      changed_when: false
+
+    - name: Show Helm version
+      ansible.builtin.debug:
+        msg: "{{ monitoring_helm_version.stdout }}"
+
+    - name: Check AWS Load Balancer Controller deployment
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - deployment
+          - aws-load-balancer-controller
+          - --namespace
+          - kube-system
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: monitoring_aws_lbc
+      changed_when: false
+      failed_when: false
+
+    - name: Wait for AWS Load Balancer Controller when installed
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment/aws-load-balancer-controller
+          - --namespace
+          - kube-system
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      when: monitoring_aws_lbc.rc == 0
+      changed_when: false
+
+    - name: Check monitoring namespace
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - namespace
+          - "{{ monitoring_namespace }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: monitoring_namespace_status
+      changed_when: false
+      failed_when: false
+
+    - name: Create monitoring namespace
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - create
+          - namespace
+          - "{{ monitoring_namespace }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      when: monitoring_namespace_status.rc != 0
+
+    - name: Add prometheus-community Helm repository
+      ansible.builtin.command:
+        argv:
+          - helm
+          - repo
+          - add
+          - "{{ kube_prometheus_stack_repository_name }}"
+          - "{{ kube_prometheus_stack_repository_url }}"
+          - --force-update
+      register: monitoring_helm_repository
+      changed_when: >-
+        'has been added' in monitoring_helm_repository.stdout
+
+    - name: Update Helm repositories
+      ansible.builtin.command:
+        argv:
+          - helm
+          - repo
+          - update
+      changed_when: false
+
+    - name: Verify kube-prometheus-stack chart version
+      ansible.builtin.command:
+        argv:
+          - helm
+          - show
+          - chart
+          - "{{ kube_prometheus_stack_chart }}"
+          - --version
+          - "{{ kube_prometheus_stack_chart_version }}"
+      register: monitoring_chart_information
+      changed_when: false
+
+    - name: Show kube-prometheus-stack chart information
+      ansible.builtin.debug:
+        msg: "{{ monitoring_chart_information.stdout_lines }}"
+
+    - name: Render kube-prometheus-stack Helm values
+      ansible.builtin.template:
+        src: kube-prometheus-stack-values.yml.j2
+        dest: "{{ kube_prometheus_stack_values_remote_path }}"
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Validate kube-prometheus-stack Helm template
+      ansible.builtin.command:
+        argv:
+          - helm
+          - template
+          - "{{ kube_prometheus_stack_release_name }}"
+          - "{{ kube_prometheus_stack_chart }}"
+          - --version
+          - "{{ kube_prometheus_stack_chart_version }}"
+          - --namespace
+          - "{{ kube_prometheus_stack_release_namespace }}"
+          - --values
+          - "{{ kube_prometheus_stack_values_remote_path }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Install or upgrade kube-prometheus-stack
+      ansible.builtin.command:
+        argv:
+          - helm
+          - upgrade
+          - --install
+          - "{{ kube_prometheus_stack_release_name }}"
+          - "{{ kube_prometheus_stack_chart }}"
+          - --version
+          - "{{ kube_prometheus_stack_chart_version }}"
+          - --namespace
+          - "{{ kube_prometheus_stack_release_namespace }}"
+          - --values
+          - "{{ kube_prometheus_stack_values_remote_path }}"
+          - --wait
+          - --timeout
+          - 10m
+          - --history-max
+          - "10"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: monitoring_helm_install
+
+    - name: Show Helm installation result
+      ansible.builtin.debug:
+        msg: "{{ monitoring_helm_install.stdout_lines }}"
+
+    - name: Verify monitoring CustomResourceDefinitions
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - crd
+          - "{{ item }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      loop:
+        - prometheuses.monitoring.coreos.com
+        - alertmanagers.monitoring.coreos.com
+        - servicemonitors.monitoring.coreos.com
+        - podmonitors.monitoring.coreos.com
+        - prometheusrules.monitoring.coreos.com
+        - probes.monitoring.coreos.com
+      changed_when: false
+
+    - name: Wait for Prometheus Operator rollout
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment/kube-prometheus-stack-operator
+          - --namespace
+          - "{{ monitoring_namespace }}"
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Wait for Grafana rollout
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment/kube-prometheus-stack-grafana
+          - --namespace
+          - "{{ monitoring_namespace }}"
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Wait for kube-state-metrics rollout
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment/kube-prometheus-stack-kube-state-metrics
+          - --namespace
+          - "{{ monitoring_namespace }}"
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Wait for node-exporter rollout
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - daemonset/kube-prometheus-stack-prometheus-node-exporter
+          - --namespace
+          - "{{ monitoring_namespace }}"
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Get Prometheus resources
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - prometheus
+          - --namespace
+          - "{{ monitoring_namespace }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: monitoring_prometheus_resources
+      changed_when: false
+
+    - name: Get Alertmanager resources
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - alertmanager
+          - --namespace
+          - "{{ monitoring_namespace }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: monitoring_alertmanager_resources
+      changed_when: false
+
+    - name: Get monitoring pods
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pods
+          - --namespace
+          - "{{ monitoring_namespace }}"
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: monitoring_pods
+      changed_when: false
+
+    - name: Get monitoring services
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - services
+          - --namespace
+          - "{{ monitoring_namespace }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: monitoring_services
+      changed_when: false
+
+    - name: Get Helm release status
+      ansible.builtin.command:
+        argv:
+          - helm
+          - status
+          - "{{ kube_prometheus_stack_release_name }}"
+          - --namespace
+          - "{{ kube_prometheus_stack_release_namespace }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: monitoring_helm_status
+      changed_when: false
+
+    - name: Show Prometheus resources
+      ansible.builtin.debug:
+        msg: "{{ monitoring_prometheus_resources.stdout_lines }}"
+
+    - name: Show Alertmanager resources
+      ansible.builtin.debug:
+        msg: "{{ monitoring_alertmanager_resources.stdout_lines }}"
+
+    - name: Show monitoring pods
+      ansible.builtin.debug:
+        msg: "{{ monitoring_pods.stdout_lines }}"
+
+    - name: Show monitoring services
+      ansible.builtin.debug:
+        msg: "{{ monitoring_services.stdout_lines }}"
+
+    - name: Show Helm release status
+      ansible.builtin.debug:
+        msg: "{{ monitoring_helm_status.stdout_lines }}"

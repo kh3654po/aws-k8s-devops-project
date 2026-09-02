@@ -5,7 +5,7 @@
   gather_facts: true
 
   vars:
-    helm_version: "v4.2.1"
+    helm_version: "v4.2.0"
     helm_install_dir: /usr/local/bin
     helm_binary_path: "{{ helm_install_dir }}/helm"
     helm_download_dir: /tmp/helm-install
