@@ -1,0 +1,211 @@
+---
+- name: Validate Kubernetes monitoring targets
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  tasks:
+    - name: Check Kubernetes administrator kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: monitoring_test_kubeconfig
+
+    - name: Fail when Kubernetes administrator kubeconfig is missing
+      ansible.builtin.assert:
+        that:
+          - monitoring_test_kubeconfig.stat.exists
+        fail_msg: >-
+          Kubernetes administrator kubeconfig was not found at
+          {{ kubeconfig_path }}.
+        success_msg: Kubernetes administrator kubeconfig was found.
+
+    - name: Check Prometheus custom resource
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - prometheus
+          - --namespace
+          - "{{ monitoring_namespace }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: monitoring_test_prometheus
+      changed_when: false
+
+    - name: Show Prometheus custom resource
+      ansible.builtin.debug:
+        msg: "{{ monitoring_test_prometheus.stdout_lines }}"
+
+    - name: Get Prometheus service ClusterIP
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - service
+          - kube-prometheus-stack-prometheus
+          - --namespace
+          - "{{ monitoring_namespace }}"
+          - -o
+          - "jsonpath={.spec.clusterIP}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: monitoring_test_prometheus_service_ip
+      changed_when: false
+
+    - name: Show Prometheus service ClusterIP
+      ansible.builtin.debug:
+        msg: >-
+          Prometheus ClusterIP:
+          {{ monitoring_test_prometheus_service_ip.stdout }}
+
+    - name: Wait for Prometheus HTTP endpoint
+      ansible.builtin.uri:
+        url: >-
+          http://{{ monitoring_test_prometheus_service_ip.stdout }}:9090/-/ready
+        method: GET
+        return_content: true
+        status_code: 200
+      register: monitoring_test_prometheus_ready
+      retries: 30
+      delay: 5
+      until: monitoring_test_prometheus_ready.status == 200
+      changed_when: false
+
+    - name: Show Prometheus readiness response
+      ansible.builtin.debug:
+        msg: "{{ monitoring_test_prometheus_ready.content }}"
+
+    - name: Get Prometheus active targets
+      ansible.builtin.uri:
+        url: >-
+          http://{{ monitoring_test_prometheus_service_ip.stdout }}:9090/api/v1/targets?state=active
+        method: GET
+        return_content: true
+        status_code: 200
+      register: monitoring_test_targets
+      changed_when: false
+
+    - name: Verify Prometheus targets API response
+      ansible.builtin.assert:
+        that:
+          - monitoring_test_targets.json.status == "success"
+          - monitoring_test_targets.json.data.activeTargets is defined
+        fail_msg: Prometheus targets API returned an invalid response.
+        success_msg: Prometheus targets API returned successfully.
+
+    - name: Store Prometheus active targets
+      ansible.builtin.set_fact:
+        monitoring_active_targets: >-
+          {{ monitoring_test_targets.json.data.activeTargets }}
+
+    - name: Store healthy Prometheus targets
+      ansible.builtin.set_fact:
+        monitoring_up_targets: >-
+          {{
+            monitoring_active_targets
+            | selectattr('health', 'equalto', 'up')
+            | list
+          }}
+
+    - name: Store unhealthy Prometheus targets
+      ansible.builtin.set_fact:
+        monitoring_down_targets: >-
+          {{
+            monitoring_active_targets
+            | rejectattr('health', 'equalto', 'up')
+            | list
+          }}
+
+    - name: Show Prometheus target summary
+      ansible.builtin.debug:
+        msg:
+          - "Total targets: {{ monitoring_active_targets | length }}"
+          - "UP targets: {{ monitoring_up_targets | length }}"
+          - "DOWN targets: {{ monitoring_down_targets | length }}"
+
+    - name: Show all Prometheus targets
+      ansible.builtin.debug:
+        msg:
+          - "Job: {{ item.labels.job | default(item.scrapePool) }}"
+          - "Instance: {{ item.labels.instance | default('unknown') }}"
+          - "Health: {{ item.health }}"
+          - "Scrape URL: {{ item.scrapeUrl }}"
+          - "Last error: {{ item.lastError | default('') }}"
+      loop: "{{ monitoring_active_targets }}"
+      loop_control:
+        label: >-
+          {{ item.labels.job | default(item.scrapePool) }}
+          /
+          {{ item.labels.instance | default('unknown') }}
+
+    - name: Show unhealthy Prometheus targets
+      ansible.builtin.debug:
+        msg:
+          - "Job: {{ item.labels.job | default(item.scrapePool) }}"
+          - "Instance: {{ item.labels.instance | default('unknown') }}"
+          - "Health: {{ item.health }}"
+          - "Scrape URL: {{ item.scrapeUrl }}"
+          - "Last error: {{ item.lastError | default('') }}"
+      loop: "{{ monitoring_down_targets }}"
+      loop_control:
+        label: >-
+          {{ item.labels.job | default(item.scrapePool) }}
+          /
+          {{ item.labels.instance | default('unknown') }}
+      when: monitoring_down_targets | length > 0
+
+    - name: Query Prometheus up metric
+      ansible.builtin.uri:
+        url: >-
+          http://{{ monitoring_test_prometheus_service_ip.stdout }}:9090/api/v1/query?query=up
+        method: GET
+        return_content: true
+        status_code: 200
+      register: monitoring_test_up_query
+      changed_when: false
+
+    - name: Verify Prometheus query API response
+      ansible.builtin.assert:
+        that:
+          - monitoring_test_up_query.json.status == "success"
+        fail_msg: Prometheus query API returned an invalid response.
+        success_msg: Prometheus query API returned successfully.
+
+    - name: Show Prometheus up metric
+      ansible.builtin.debug:
+        msg: "{{ monitoring_test_up_query.json.data.result }}"
+
+    - name: Get ServiceMonitors
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - servicemonitor
+          - --all-namespaces
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: monitoring_test_service_monitors
+      changed_when: false
+
+    - name: Show ServiceMonitors
+      ansible.builtin.debug:
+        msg: "{{ monitoring_test_service_monitors.stdout_lines }}"
+
+    - name: Get monitoring endpoints
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - endpointslice
+          - --all-namespaces
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: monitoring_test_endpoint_slices
+      changed_when: false
+
+    - name: Show monitoring EndpointSlices
+      ansible.builtin.debug:
+        msg: "{{ monitoring_test_endpoint_slices.stdout_lines }}"
