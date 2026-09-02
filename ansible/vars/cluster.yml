@@ -115,3 +115,92 @@ aws_load_balancer_controller_gateway_crds_url: >-
 
 aws_load_balancer_controller_alb_gateway_enabled: true
 aws_load_balancer_controller_nlb_gateway_enabled: false
+
+# Monitoring
+monitoring_namespace: monitoring
+
+kube_prometheus_stack_repository_name: prometheus-community
+kube_prometheus_stack_repository_url: https://prometheus-community.github.io/helm-charts
+
+kube_prometheus_stack_chart: prometheus-community/kube-prometheus-stack
+kube_prometheus_stack_chart_version: "88.6.2"
+
+kube_prometheus_stack_release_name: kube-prometheus-stack
+kube_prometheus_stack_release_namespace: "{{ monitoring_namespace }}"
+
+kube_prometheus_stack_values_remote_path: /tmp/kube-prometheus-stack-values.yml
+
+# Prometheus
+prometheus_replicas: 1
+prometheus_retention: 7d
+prometheus_scrape_interval: 30s
+prometheus_evaluation_interval: 30s
+
+prometheus_persistence_enabled: false
+prometheus_storage_size: 10Gi
+
+prometheus_resources:
+  requests:
+    cpu: 200m
+    memory: 512Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi
+
+# Prometheus Operator
+prometheus_operator_resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# Alertmanager
+alertmanager_replicas: 1
+
+alertmanager_persistence_enabled: false
+alertmanager_storage_size: 2Gi
+
+alertmanager_resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    cpu: 300m
+    memory: 256Mi
+
+# Grafana
+grafana_replicas: 1
+
+grafana_admin_user: admin
+grafana_admin_password: change-me-after-install
+
+grafana_persistence_enabled: false
+grafana_storage_size: 2Gi
+
+grafana_resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# kube-state-metrics
+kube_state_metrics_resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 300m
+    memory: 256Mi
+
+# node-exporter
+node_exporter_resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi

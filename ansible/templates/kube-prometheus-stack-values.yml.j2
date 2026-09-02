@@ -1,0 +1,170 @@
+---
+fullnameOverride: "{{ kube_prometheus_stack_release_name }}"
+
+defaultRules:
+  create: true
+
+grafana:
+  enabled: true
+
+  replicas: {{ grafana_replicas }}
+
+  adminUser: "{{ grafana_admin_user }}"
+  adminPassword: "{{ grafana_admin_password }}"
+
+  service:
+    type: ClusterIP
+    port: 80
+
+  ingress:
+    enabled: false
+
+  persistence:
+    enabled: {{ grafana_persistence_enabled | bool | lower }}
+{% if grafana_persistence_enabled | bool %}
+    type: pvc
+    accessModes:
+      - ReadWriteOnce
+    size: "{{ grafana_storage_size }}"
+{% endif %}
+
+  resources:
+    requests:
+      cpu: "{{ grafana_resources.requests.cpu }}"
+      memory: "{{ grafana_resources.requests.memory }}"
+    limits:
+      cpu: "{{ grafana_resources.limits.cpu }}"
+      memory: "{{ grafana_resources.limits.memory }}"
+
+  sidecar:
+    dashboards:
+      enabled: true
+
+    datasources:
+      enabled: true
+
+prometheusOperator:
+  enabled: true
+
+  resources:
+    requests:
+      cpu: "{{ prometheus_operator_resources.requests.cpu }}"
+      memory: "{{ prometheus_operator_resources.requests.memory }}"
+    limits:
+      cpu: "{{ prometheus_operator_resources.limits.cpu }}"
+      memory: "{{ prometheus_operator_resources.limits.memory }}"
+
+prometheus:
+  enabled: true
+
+  service:
+    type: ClusterIP
+
+  ingress:
+    enabled: false
+
+  prometheusSpec:
+    replicas: {{ prometheus_replicas }}
+
+    retention: "{{ prometheus_retention }}"
+
+    scrapeInterval: "{{ prometheus_scrape_interval }}"
+    evaluationInterval: "{{ prometheus_evaluation_interval }}"
+
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    probeSelectorNilUsesHelmValues: false
+
+    resources:
+      requests:
+        cpu: "{{ prometheus_resources.requests.cpu }}"
+        memory: "{{ prometheus_resources.requests.memory }}"
+      limits:
+        cpu: "{{ prometheus_resources.limits.cpu }}"
+        memory: "{{ prometheus_resources.limits.memory }}"
+
+{% if prometheus_persistence_enabled | bool %}
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          accessModes:
+            - ReadWriteOnce
+
+          resources:
+            requests:
+              storage: "{{ prometheus_storage_size }}"
+{% endif %}
+
+alertmanager:
+  enabled: true
+
+  service:
+    type: ClusterIP
+
+  ingress:
+    enabled: false
+
+  alertmanagerSpec:
+    replicas: {{ alertmanager_replicas }}
+
+    resources:
+      requests:
+        cpu: "{{ alertmanager_resources.requests.cpu }}"
+        memory: "{{ alertmanager_resources.requests.memory }}"
+      limits:
+        cpu: "{{ alertmanager_resources.limits.cpu }}"
+        memory: "{{ alertmanager_resources.limits.memory }}"
+
+{% if alertmanager_persistence_enabled | bool %}
+    storage:
+      volumeClaimTemplate:
+        spec:
+          accessModes:
+            - ReadWriteOnce
+
+          resources:
+            requests:
+              storage: "{{ alertmanager_storage_size }}"
+{% endif %}
+
+kube-state-metrics:
+  enabled: true
+
+  resources:
+    requests:
+      cpu: "{{ kube_state_metrics_resources.requests.cpu }}"
+      memory: "{{ kube_state_metrics_resources.requests.memory }}"
+    limits:
+      cpu: "{{ kube_state_metrics_resources.limits.cpu }}"
+      memory: "{{ kube_state_metrics_resources.limits.memory }}"
+
+prometheus-node-exporter:
+  resources:
+    requests:
+      cpu: "{{ node_exporter_resources.requests.cpu }}"
+      memory: "{{ node_exporter_resources.requests.memory }}"
+    limits:
+      cpu: "{{ node_exporter_resources.limits.cpu }}"
+      memory: "{{ node_exporter_resources.limits.memory }}"
+
+kubeApiServer:
+  enabled: true
+
+kubelet:
+  enabled: true
+
+kubeControllerManager:
+  enabled: true
+
+kubeScheduler:
+  enabled: true
+
+kubeEtcd:
+  enabled: true
+
+coreDns:
+  enabled: true
+
+kubeProxy:
+  enabled: true
