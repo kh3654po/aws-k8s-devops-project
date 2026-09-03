@@ -1,0 +1,144 @@
+---
+- name: Configure Prometheus monitoring rules
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  tasks:
+    - name: Check Kubernetes administrator kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: monitoring_rules_kubeconfig
+
+    - name: Fail when Kubernetes administrator kubeconfig is missing
+      ansible.builtin.assert:
+        that:
+          - monitoring_rules_kubeconfig.stat.exists
+        fail_msg: >-
+          Kubernetes administrator kubeconfig was not found at
+          {{ kubeconfig_path }}.
+
+    - name: Check PrometheusRule CRD
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - crd
+          - prometheusrules.monitoring.coreos.com
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Check Prometheus custom resource
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - prometheus
+          - --namespace
+          - "{{ monitoring_namespace }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Render custom Prometheus rules
+      ansible.builtin.template:
+        src: monitoring-prometheus-rules.yml.j2
+        dest: /tmp/monitoring-prometheus-rules.yml
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Apply custom Prometheus rules
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - -f
+          - /tmp/monitoring-prometheus-rules.yml
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: monitoring_rules_apply
+      changed_when: >-
+        'created' in monitoring_rules_apply.stdout or
+        'configured' in monitoring_rules_apply.stdout
+
+    - name: Get custom PrometheusRule
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - prometheusrule
+          - custom-monitoring-rules
+          - --namespace
+          - "{{ monitoring_namespace }}"
+          - --show-labels
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: monitoring_rules_resource
+      changed_when: false
+
+    - name: Show custom PrometheusRule
+      ansible.builtin.debug:
+        msg: "{{ monitoring_rules_resource.stdout_lines }}"
+
+    - name: Wait for Prometheus to discover rules
+      ansible.builtin.pause:
+        seconds: 10
+
+    - name: Get Prometheus service ClusterIP
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - service
+          - kube-prometheus-stack-prometheus
+          - --namespace
+          - "{{ monitoring_namespace }}"
+          - -o
+          - "jsonpath={.spec.clusterIP}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: monitoring_rules_prometheus_ip
+      changed_when: false
+
+    - name: Query Prometheus rules API
+      ansible.builtin.uri:
+        url: >-
+          http://{{ monitoring_rules_prometheus_ip.stdout }}:9090/api/v1/rules
+        method: GET
+        return_content: true
+        status_code: 200
+      register: monitoring_rules_api
+      changed_when: false
+
+    - name: Verify Prometheus rules API
+      ansible.builtin.assert:
+        that:
+          - monitoring_rules_api.json.status == "success"
+        fail_msg: Prometheus rules API returned an invalid response.
+        success_msg: Prometheus rules API returned successfully.
+
+    - name: Get active Prometheus alerts
+      ansible.builtin.uri:
+        url: >-
+          http://{{ monitoring_rules_prometheus_ip.stdout }}:9090/api/v1/alerts
+        method: GET
+        return_content: true
+        status_code: 200
+      register: monitoring_alerts_api
+      changed_when: false
+
+    - name: Verify Prometheus alerts API
+      ansible.builtin.assert:
+        that:
+          - monitoring_alerts_api.json.status == "success"
+        fail_msg: Prometheus alerts API returned an invalid response.
+        success_msg: Prometheus alerts API returned successfully.
+
+    - name: Show active Prometheus alerts
+      ansible.builtin.debug:
+        msg: "{{ monitoring_alerts_api.json.data.alerts }}"

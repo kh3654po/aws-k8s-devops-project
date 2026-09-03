@@ -1,0 +1,90 @@
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: custom-monitoring-rules
+  namespace: "{{ monitoring_namespace }}"
+  labels:
+    release: "{{ kube_prometheus_stack_release_name }}"
+
+spec:
+  groups:
+    - name: application.rules
+      rules:
+        - alert: ApplicationTargetDown
+          expr: |
+            min(
+              up{
+                namespace="monitoring-app"
+              }
+            ) == 0
+          for: 2m
+          labels:
+            severity: critical
+            category: application
+          annotations:
+            summary: Monitoring demo application target is down
+            description: >-
+              At least one Prometheus target in the monitoring-app
+              namespace has been down for more than 2 minutes.
+
+        - alert: PodRestartDetected
+          expr: |
+            increase(
+              kube_pod_container_status_restarts_total{
+                namespace="monitoring-app"
+              }[10m]
+            ) > 0
+          for: 1m
+          labels:
+            severity: warning
+            category: kubernetes
+          annotations:
+            summary: Pod container restart detected
+            description: >-
+              A container in the monitoring-app namespace has restarted
+              during the last 10 minutes.
+
+    - name: node.rules
+      rules:
+        - alert: HighNodeCPUUsage
+          expr: |
+            (
+              1 -
+              avg by(instance) (
+                rate(
+                  node_cpu_seconds_total{
+                    mode="idle"
+                  }[5m]
+                )
+              )
+            ) * 100 > 80
+          for: 5m
+          labels:
+            severity: warning
+            category: node
+          annotations:
+            summary: High node CPU usage detected
+            description: >-
+              Node CPU usage has remained above 80 percent
+              for more than 5 minutes.
+
+        - alert: HighNodeMemoryUsage
+          expr: |
+            (
+              1 -
+              (
+                node_memory_MemAvailable_bytes
+                /
+                node_memory_MemTotal_bytes
+              )
+            ) * 100 > 80
+          for: 5m
+          labels:
+            severity: warning
+            category: node
+          annotations:
+            summary: High node memory usage detected
+            description: >-
+              Node memory usage has remained above 80 percent
+              for more than 5 minutes.
