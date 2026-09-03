@@ -1,0 +1,134 @@
+---
+- name: Deploy and validate application monitoring
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  tasks:
+    - name: Check Kubernetes administrator kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: monitoring_app_kubeconfig
+
+    - name: Fail when Kubernetes administrator kubeconfig is missing
+      ansible.builtin.assert:
+        that:
+          - monitoring_app_kubeconfig.stat.exists
+        fail_msg: >-
+          Kubernetes administrator kubeconfig was not found at
+          {{ kubeconfig_path }}.
+
+    - name: Copy monitoring application manifest
+      ansible.builtin.copy:
+        src: files/monitoring-app.yaml
+        dest: /tmp/monitoring-app.yaml
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Deploy monitoring test application
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - -f
+          - /tmp/monitoring-app.yaml
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: monitoring_app_apply
+      changed_when: >-
+        'created' in monitoring_app_apply.stdout or
+        'configured' in monitoring_app_apply.stdout
+
+    - name: Wait for monitoring demo deployment
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment/monitoring-demo
+          - --namespace
+          - monitoring-app
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Get monitoring demo pods
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pods
+          - --namespace
+          - monitoring-app
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: monitoring_app_pods
+      changed_when: false
+
+    - name: Get monitoring demo service
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - service
+          - monitoring-demo
+          - --namespace
+          - monitoring-app
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: monitoring_app_service
+      changed_when: false
+
+    - name: Get monitoring demo ServiceMonitor
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - servicemonitor
+          - monitoring-demo
+          - --namespace
+          - monitoring-app
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: monitoring_app_service_monitor
+      changed_when: false
+
+    - name: Get monitoring demo endpoints
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - endpointslice
+          - --namespace
+          - monitoring-app
+          - -l
+          - kubernetes.io/service-name=monitoring-demo
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: monitoring_app_endpoints
+      changed_when: false
+
+    - name: Show monitoring demo pods
+      ansible.builtin.debug:
+        msg: "{{ monitoring_app_pods.stdout_lines }}"
+
+    - name: Show monitoring demo service
+      ansible.builtin.debug:
+        msg: "{{ monitoring_app_service.stdout_lines }}"
+
+    - name: Show monitoring demo ServiceMonitor
+      ansible.builtin.debug:
+        msg: "{{ monitoring_app_service_monitor.stdout_lines }}"
+
+    - name: Show monitoring demo endpoints
+      ansible.builtin.debug:
+        msg: "{{ monitoring_app_endpoints.stdout_lines }}"

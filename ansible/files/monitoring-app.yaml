@@ -1,0 +1,75 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring-app
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: monitoring-demo
+  namespace: monitoring-app
+  labels:
+    app: monitoring-demo
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: monitoring-demo
+  template:
+    metadata:
+      labels:
+        app: monitoring-demo
+    spec:
+      containers:
+        - name: monitoring-demo
+          image: quay.io/brancz/prometheus-example-app:v0.5.0
+          ports:
+            - name: http
+              containerPort: 8080
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: monitoring-demo
+  namespace: monitoring-app
+  labels:
+    app: monitoring-demo
+spec:
+  selector:
+    app: monitoring-demo
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: monitoring-demo
+  namespace: monitoring-app
+  labels:
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app: monitoring-demo
+
+  namespaceSelector:
+    matchNames:
+      - monitoring-app
+
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s
