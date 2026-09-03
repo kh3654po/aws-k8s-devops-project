@@ -1,0 +1,134 @@
+---
+- name: Configure Grafana monitoring dashboards
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  tasks:
+    - name: Check Kubernetes administrator kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: monitoring_dashboard_kubeconfig
+
+    - name: Fail when Kubernetes administrator kubeconfig is missing
+      ansible.builtin.assert:
+        that:
+          - monitoring_dashboard_kubeconfig.stat.exists
+        fail_msg: >-
+          Kubernetes administrator kubeconfig was not found at
+          {{ kubeconfig_path }}.
+
+    - name: Check Grafana deployment
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - deployment
+          - kube-prometheus-stack-grafana
+          - --namespace
+          - "{{ monitoring_namespace }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Wait for Grafana rollout
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment/kube-prometheus-stack-grafana
+          - --namespace
+          - "{{ monitoring_namespace }}"
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Render monitoring application Grafana dashboard
+      ansible.builtin.template:
+        src: monitoring-app-dashboard-configmap.yml.j2
+        dest: /tmp/monitoring-app-dashboard-configmap.yml
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Apply monitoring application Grafana dashboard
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - -f
+          - /tmp/monitoring-app-dashboard-configmap.yml
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: monitoring_dashboard_apply
+      changed_when: >-
+        'created' in monitoring_dashboard_apply.stdout or
+        'configured' in monitoring_dashboard_apply.stdout
+
+    - name: Get monitoring dashboard ConfigMap
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - configmap
+          - monitoring-app-dashboard
+          - --namespace
+          - "{{ monitoring_namespace }}"
+          - --show-labels
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: monitoring_dashboard_configmap
+      changed_when: false
+
+    - name: Show monitoring dashboard ConfigMap
+      ansible.builtin.debug:
+        msg: "{{ monitoring_dashboard_configmap.stdout_lines }}"
+
+    - name: Get Grafana pod containers
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pods
+          - --namespace
+          - "{{ monitoring_namespace }}"
+          - -l
+          - app.kubernetes.io/name=grafana
+          - -o
+          - "jsonpath={.items[0].spec.containers[*].name}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: monitoring_dashboard_grafana_containers
+      changed_when: false
+
+    - name: Show Grafana pod containers
+      ansible.builtin.debug:
+        msg: "{{ monitoring_dashboard_grafana_containers.stdout }}"
+
+    - name: Wait for Grafana sidecar to discover dashboard
+      ansible.builtin.pause:
+        seconds: 10
+
+    - name: Get Grafana pods
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pods
+          - --namespace
+          - "{{ monitoring_namespace }}"
+          - -l
+          - app.kubernetes.io/name=grafana
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: monitoring_dashboard_grafana_pods
+      changed_when: false
+
+    - name: Show Grafana pods
+      ansible.builtin.debug:
+        msg: "{{ monitoring_dashboard_grafana_pods.stdout_lines }}"
