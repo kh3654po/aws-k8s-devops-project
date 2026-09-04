@@ -1,0 +1,69 @@
+---
+- name: Validate Prometheus and Alertmanager alerts
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  tasks:
+    - name: Get Prometheus service ClusterIP
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - service
+          - kube-prometheus-stack-prometheus
+          - --namespace
+          - "{{ monitoring_namespace }}"
+          - -o
+          - "jsonpath={.spec.clusterIP}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: monitoring_alert_test_prometheus_ip
+      changed_when: false
+
+    - name: Get Alertmanager service ClusterIP
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - service
+          - kube-prometheus-stack-alertmanager
+          - --namespace
+          - "{{ monitoring_namespace }}"
+          - -o
+          - "jsonpath={.spec.clusterIP}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: monitoring_alert_test_alertmanager_ip
+      changed_when: false
+
+    - name: Query Prometheus alerts
+      ansible.builtin.uri:
+        url: >-
+          http://{{ monitoring_alert_test_prometheus_ip.stdout }}:9090/api/v1/alerts
+        method: GET
+        return_content: true
+        status_code: 200
+      register: monitoring_alert_test_prometheus_alerts
+      changed_when: false
+
+    - name: Query Alertmanager alerts
+      ansible.builtin.uri:
+        url: >-
+          http://{{ monitoring_alert_test_alertmanager_ip.stdout }}:9093/api/v2/alerts
+        method: GET
+        return_content: true
+        status_code: 200
+      register: monitoring_alert_test_alertmanager_alerts
+      changed_when: false
+
+    - name: Show Prometheus active alerts
+      ansible.builtin.debug:
+        msg: "{{ monitoring_alert_test_prometheus_alerts.json.data.alerts }}"
+
+    - name: Show Alertmanager active alerts
+      ansible.builtin.debug:
+        msg: "{{ monitoring_alert_test_alertmanager_alerts.json }}"
