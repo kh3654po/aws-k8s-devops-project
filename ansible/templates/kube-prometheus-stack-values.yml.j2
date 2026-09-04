@@ -99,6 +99,49 @@ prometheus:
 alertmanager:
   enabled: true
 
+  alertmanagerSpec:
+    replicas: {{ alertmanager_replicas }}
+
+{% if alertmanager_persistence_enabled %}
+    storage:
+      volumeClaimTemplate:
+        spec:
+          resources:
+            requests:
+              storage: {{ alertmanager_storage_size }}
+{% endif %}
+
+  config:
+    global:
+      resolve_timeout: 5m
+
+    route:
+      receiver: default-receiver
+
+      group_by:
+        - alertname
+        - severity
+
+      group_wait: {{ alertmanager_group_wait }}
+      group_interval: {{ alertmanager_group_interval }}
+      repeat_interval: {{ alertmanager_repeat_interval }}
+
+      routes:
+        - receiver: critical-receiver
+          matchers:
+            - severity="critical"
+
+        - receiver: warning-receiver
+          matchers:
+            - severity="warning"
+
+    receivers:
+      - name: default-receiver
+
+      - name: critical-receiver
+
+      - name: warning-receiver
+
   service:
     type: ClusterIP
 

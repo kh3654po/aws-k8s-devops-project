@@ -1,0 +1,129 @@
+---
+- name: Validate Alertmanager configuration
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  tasks:
+    - name: Check Kubernetes administrator kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: monitoring_alertmanager_kubeconfig
+
+    - name: Fail when Kubernetes administrator kubeconfig is missing
+      ansible.builtin.assert:
+        that:
+          - monitoring_alertmanager_kubeconfig.stat.exists
+        fail_msg: >-
+          Kubernetes administrator kubeconfig was not found at
+          {{ kubeconfig_path }}.
+
+    - name: Check Alertmanager custom resource
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - alertmanager
+          - kube-prometheus-stack-alertmanager
+          - --namespace
+          - "{{ monitoring_namespace }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Wait for Alertmanager StatefulSet rollout
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - statefulset/alertmanager-kube-prometheus-stack-alertmanager
+          - --namespace
+          - "{{ monitoring_namespace }}"
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Get Alertmanager pods
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pods
+          - --namespace
+          - "{{ monitoring_namespace }}"
+          - -l
+          - app.kubernetes.io/name=alertmanager
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: monitoring_alertmanager_pods
+      changed_when: false
+
+    - name: Show Alertmanager pods
+      ansible.builtin.debug:
+        msg: "{{ monitoring_alertmanager_pods.stdout_lines }}"
+
+    - name: Get Alertmanager service ClusterIP
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - service
+          - kube-prometheus-stack-alertmanager
+          - --namespace
+          - "{{ monitoring_namespace }}"
+          - -o
+          - "jsonpath={.spec.clusterIP}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: monitoring_alertmanager_service_ip
+      changed_when: false
+
+    - name: Wait for Alertmanager ready endpoint
+      ansible.builtin.uri:
+        url: >-
+          http://{{ monitoring_alertmanager_service_ip.stdout }}:9093/-/ready
+        method: GET
+        status_code: 200
+      register: monitoring_alertmanager_ready
+      retries: 20
+      delay: 5
+      until: monitoring_alertmanager_ready.status == 200
+      changed_when: false
+
+    - name: Query Alertmanager status API
+      ansible.builtin.uri:
+        url: >-
+          http://{{ monitoring_alertmanager_service_ip.stdout }}:9093/api/v2/status
+        method: GET
+        return_content: true
+        status_code: 200
+      register: monitoring_alertmanager_status
+      changed_when: false
+
+    - name: Verify Alertmanager status API
+      ansible.builtin.assert:
+        that:
+          - monitoring_alertmanager_status.status == 200
+        success_msg: Alertmanager status API returned successfully.
+        fail_msg: Alertmanager status API request failed.
+
+    - name: Query Alertmanager alerts API
+      ansible.builtin.uri:
+        url: >-
+          http://{{ monitoring_alertmanager_service_ip.stdout }}:9093/api/v2/alerts
+        method: GET
+        return_content: true
+        status_code: 200
+      register: monitoring_alertmanager_alerts
+      changed_when: false
+
+    - name: Show Alertmanager alerts
+      ansible.builtin.debug:
+        msg: "{{ monitoring_alertmanager_alerts.json }}"
