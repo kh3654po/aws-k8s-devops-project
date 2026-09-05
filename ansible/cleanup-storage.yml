@@ -1,0 +1,156 @@
+---
+- name: Cleanup Kubernetes resources backed by AWS EBS
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  tasks:
+    # ==================================================
+    # Discover EBS PVs
+    # ==================================================
+
+    - name: Get PersistentVolumes
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pv
+          - -o
+          - json
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: cleanup_pvs_raw
+      changed_when: false
+
+    - name: Initialize EBS PersistentVolume list
+      ansible.builtin.set_fact:
+        cleanup_ebs_pvs: []
+
+    - name: Collect EBS PersistentVolumes
+      ansible.builtin.set_fact:
+        cleanup_ebs_pvs: >-
+          {{
+            cleanup_ebs_pvs
+            +
+            [
+              {
+                'name': item.metadata.name,
+                'volume_id': item.spec.csi.volumeHandle,
+                'reclaim_policy': item.spec.persistentVolumeReclaimPolicy,
+                'namespace': item.spec.claimRef.namespace | default(''),
+                'claim_name': item.spec.claimRef.name | default('')
+              }
+            ]
+          }}
+      loop: "{{ (cleanup_pvs_raw.stdout | from_json)['items'] }}"
+      when:
+        - item.spec.csi is defined
+        - item.spec.csi.driver | default('') == 'ebs.csi.aws.com'
+
+    - name: Display EBS volumes scheduled for cleanup
+      ansible.builtin.debug:
+        var: cleanup_ebs_pvs
+
+    # ==================================================
+    # Safety
+    # ==================================================
+
+    - name: Verify dynamically provisioned EBS volumes use Delete reclaim policy
+      ansible.builtin.assert:
+        that:
+          - item.reclaim_policy == 'Delete'
+        fail_msg: >-
+          PersistentVolume {{ item.name }} uses reclaimPolicy={{ item.reclaim_policy }}.
+          Automatic cleanup has been stopped because deleting its PVC
+          may intentionally preserve AWS EBS volume {{ item.volume_id }}.
+      loop: "{{ cleanup_ebs_pvs }}"
+
+    # ==================================================
+    # Stop project workloads
+    # ==================================================
+
+    - name: Delete project workload namespaces
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - delete
+          - namespace
+          - "{{ item }}"
+          - --ignore-not-found=true
+          - --wait=false
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      loop: "{{ destroy_cleanup_namespaces }}"
+
+    # ==================================================
+    # Request PVC deletion
+    # ==================================================
+
+    - name: Request deletion of EBS-backed PVCs
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - delete
+          - pvc
+          - "{{ item.claim_name }}"
+          - --namespace
+          - "{{ item.namespace }}"
+          - --ignore-not-found=true
+          - --wait=false
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      loop: "{{ cleanup_ebs_pvs }}"
+      when:
+        - item.namespace | length > 0
+        - item.claim_name | length > 0
+      failed_when: false
+
+    # ==================================================
+    # Wait PVC deletion
+    # ==================================================
+
+    - name: Wait until EBS-backed PVCs are deleted
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pvc
+          - "{{ item.claim_name }}"
+          - --namespace
+          - "{{ item.namespace }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: cleanup_pvc_wait
+      changed_when: false
+      failed_when: false
+      until: cleanup_pvc_wait.rc != 0
+      retries: 60
+      delay: 5
+      loop: "{{ cleanup_ebs_pvs }}"
+      when:
+        - item.namespace | length > 0
+        - item.claim_name | length > 0
+
+    # ==================================================
+    # Wait PV / EBS deletion
+    # ==================================================
+
+    - name: Wait until EBS PersistentVolumes are deleted
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pv
+          - "{{ item.name }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: cleanup_pv_wait
+      changed_when: false
+      failed_when: false
+      until: cleanup_pv_wait.rc != 0
+      retries: 60
+      delay: 5
+      loop: "{{ cleanup_ebs_pvs }}"

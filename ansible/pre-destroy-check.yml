@@ -1,0 +1,187 @@
+---
+- name: Inspect Kubernetes-managed AWS resources before infrastructure destroy
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  tasks:
+    - name: Check Kubernetes administrator kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: destroy_kubeconfig
+
+    - name: Fail when Kubernetes administrator kubeconfig does not exist
+      ansible.builtin.assert:
+        that:
+          - destroy_kubeconfig.stat.exists
+        fail_msg: >-
+          Kubernetes administrator kubeconfig was not found at
+          {{ kubeconfig_path }}.
+          Kubernetes-managed AWS resources must be cleaned up
+          before Terraform destroy.
+
+    # --------------------------------------------------
+    # Ingress
+    # --------------------------------------------------
+
+    - name: Get all Ingress resources
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - ingress
+          - --all-namespaces
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: destroy_ingresses
+      changed_when: false
+      failed_when: false
+
+    # --------------------------------------------------
+    # Gateway
+    # --------------------------------------------------
+
+    - name: Get all Gateway resources
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - gateway
+          - --all-namespaces
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: destroy_gateways
+      changed_when: false
+      failed_when: false
+
+    # --------------------------------------------------
+    # LoadBalancer Services
+    # --------------------------------------------------
+
+    - name: Get all Services
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - service
+          - --all-namespaces
+          - -o
+          - json
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: destroy_services
+      changed_when: false
+
+    - name: Initialize LoadBalancer Service list
+      ansible.builtin.set_fact:
+        destroy_load_balancer_services: []
+
+    - name: Collect LoadBalancer Services
+      ansible.builtin.set_fact:
+        destroy_load_balancer_services: >-
+          {{
+            destroy_load_balancer_services
+            +
+            [
+              {
+                'namespace': item.metadata.namespace,
+                'name': item.metadata.name
+              }
+            ]
+          }}
+      loop: "{{ (destroy_services.stdout | from_json)['items'] }}"
+      when:
+        - item.spec.type | default('') == 'LoadBalancer'
+
+    # --------------------------------------------------
+    # PVC
+    # --------------------------------------------------
+
+    - name: Get all PVCs
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pvc
+          - --all-namespaces
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: destroy_pvcs
+      changed_when: false
+
+    # --------------------------------------------------
+    # PV
+    # --------------------------------------------------
+
+    - name: Get all PersistentVolumes
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pv
+          - -o
+          - json
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: destroy_pvs
+      changed_when: false
+
+    - name: Initialize EBS PersistentVolume list
+      ansible.builtin.set_fact:
+        destroy_ebs_pvs: []
+
+    - name: Collect EBS PersistentVolumes
+      ansible.builtin.set_fact:
+        destroy_ebs_pvs: >-
+          {{
+            destroy_ebs_pvs
+            +
+            [
+              {
+                'name': item.metadata.name,
+                'volume_id': item.spec.csi.volumeHandle,
+                'reclaim_policy': item.spec.persistentVolumeReclaimPolicy,
+                'namespace': item.spec.claimRef.namespace | default(''),
+                'claim_name': item.spec.claimRef.name | default('')
+              }
+            ]
+          }}
+      loop: "{{ (destroy_pvs.stdout | from_json)['items'] }}"
+      when:
+        - item.spec.csi is defined
+        - item.spec.csi.driver | default('') == 'ebs.csi.aws.com'
+
+    # --------------------------------------------------
+    # Result
+    # --------------------------------------------------
+
+    - name: Display pre-destroy resources
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - " Kubernetes pre-destroy inspection"
+          - "=========================================="
+          - ""
+          - "Ingress resources:"
+          - "{{ destroy_ingresses.stdout_lines }}"
+          - ""
+          - "Gateway resources:"
+          - "{{ destroy_gateways.stdout_lines }}"
+          - ""
+          - "LoadBalancer Services:"
+          - "{{ destroy_load_balancer_services }}"
+          - ""
+          - "PVC resources:"
+          - "{{ destroy_pvcs.stdout_lines }}"
+          - ""
+          - "EBS PersistentVolumes:"
+          - "{{ destroy_ebs_pvs }}"

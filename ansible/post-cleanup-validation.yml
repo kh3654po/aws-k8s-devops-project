@@ -1,0 +1,173 @@
+---
+- name: Validate Kubernetes-managed AWS resources are cleaned up
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  tasks:
+    # ==================================================
+    # Ingress
+    # ==================================================
+
+    - name: Get remaining Ingress resources
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - ingress
+          - --all-namespaces
+          - -o
+          - json
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: remaining_ingresses_raw
+      changed_when: false
+
+    - name: Verify no Ingress resources remain
+      ansible.builtin.assert:
+        that:
+          - (remaining_ingresses_raw.stdout | from_json)['items'] | length == 0
+        fail_msg: >-
+          Ingress resources still exist.
+          Terraform destroy has been blocked.
+
+    # ==================================================
+    # Gateway
+    # ==================================================
+
+    - name: Get remaining Gateway resources
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - gateway
+          - --all-namespaces
+          - -o
+          - json
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: remaining_gateways_raw
+      changed_when: false
+
+    - name: Verify no Gateway resources remain
+      ansible.builtin.assert:
+        that:
+          - (remaining_gateways_raw.stdout | from_json)['items'] | length == 0
+        fail_msg: >-
+          Gateway resources still exist.
+          Terraform destroy has been blocked.
+
+    # ==================================================
+    # LoadBalancer Service
+    # ==================================================
+
+    - name: Get remaining Services
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - service
+          - --all-namespaces
+          - -o
+          - json
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: remaining_services_raw
+      changed_when: false
+
+    - name: Initialize remaining LoadBalancer Service list
+      ansible.builtin.set_fact:
+        remaining_load_balancer_services: []
+
+    - name: Collect remaining LoadBalancer Services
+      ansible.builtin.set_fact:
+        remaining_load_balancer_services: >-
+          {{
+            remaining_load_balancer_services
+            +
+            [
+              item.metadata.namespace
+              ~ '/'
+              ~ item.metadata.name
+            ]
+          }}
+      loop: "{{ (remaining_services_raw.stdout | from_json)['items'] }}"
+      when:
+        - item.spec.type | default('') == 'LoadBalancer'
+
+    - name: Verify no LoadBalancer Services remain
+      ansible.builtin.assert:
+        that:
+          - remaining_load_balancer_services | length == 0
+        fail_msg: >-
+          LoadBalancer Services still exist:
+          {{ remaining_load_balancer_services }}.
+          Terraform destroy has been blocked.
+
+    # ==================================================
+    # EBS PV
+    # ==================================================
+
+    - name: Get remaining PersistentVolumes
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pv
+          - -o
+          - json
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: remaining_pvs_raw
+      changed_when: false
+
+    - name: Initialize remaining EBS PersistentVolume list
+      ansible.builtin.set_fact:
+        remaining_ebs_pvs: []
+
+    - name: Collect remaining EBS PersistentVolumes
+      ansible.builtin.set_fact:
+        remaining_ebs_pvs: >-
+          {{
+            remaining_ebs_pvs
+            +
+            [
+              {
+                'name': item.metadata.name,
+                'volume_id': item.spec.csi.volumeHandle
+              }
+            ]
+          }}
+      loop: "{{ (remaining_pvs_raw.stdout | from_json)['items'] }}"
+      when:
+        - item.spec.csi is defined
+        - item.spec.csi.driver | default('') == 'ebs.csi.aws.com'
+
+    - name: Verify no EBS PersistentVolumes remain
+      ansible.builtin.assert:
+        that:
+          - remaining_ebs_pvs | length == 0
+        fail_msg: >-
+          EBS-backed PersistentVolumes still exist:
+          {{ remaining_ebs_pvs }}.
+          Terraform destroy has been blocked.
+
+    # ==================================================
+    # Success
+    # ==================================================
+
+    - name: Display successful cleanup validation
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - " Kubernetes cloud cleanup completed"
+          - "=========================================="
+          - "Ingress              : {{ (remaining_ingresses_raw.stdout | from_json)['items'] | length }}"
+          - "Gateway              : {{ (remaining_gateways_raw.stdout | from_json)['items'] | length }}"
+          - "LoadBalancer Service : {{ remaining_load_balancer_services | length }}"
+          - "EBS PersistentVolume : {{ remaining_ebs_pvs | length }}"
+          - ""
+          - "Terraform destroy may now proceed."

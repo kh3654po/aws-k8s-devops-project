@@ -230,3 +230,14 @@ ebs_storage_volume_binding_mode: WaitForFirstConsumer
 pvc_test_namespace: storage-test
 pvc_test_name: ebs-pvc-test
 pvc_test_storage_size: 1Gi
+
+# ========================================
+# Pre-destroy cleanup
+# ========================================
+
+destroy_cleanup_namespaces:
+  - monitoring
+  - monitoring-app
+  - storage-test
+
+destroy_cleanup_timeout: 300

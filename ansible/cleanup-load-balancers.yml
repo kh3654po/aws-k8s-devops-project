@@ -1,0 +1,301 @@
+---
+- name: Cleanup Kubernetes resources backed by AWS load balancers
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  tasks:
+    # ==================================================
+    # HTTPRoute
+    # ==================================================
+
+    - name: Get HTTPRoute resources
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - httproute
+          - --all-namespaces
+          - -o
+          - json
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: cleanup_http_routes_raw
+      changed_when: false
+      failed_when: false
+
+    - name: Initialize HTTPRoute list
+      ansible.builtin.set_fact:
+        cleanup_http_routes: []
+
+    - name: Collect HTTPRoute resources
+      ansible.builtin.set_fact:
+        cleanup_http_routes: >-
+          {{
+            cleanup_http_routes
+            +
+            [
+              {
+                'namespace': item.metadata.namespace,
+                'name': item.metadata.name
+              }
+            ]
+          }}
+      loop: >-
+        {{
+          (
+            cleanup_http_routes_raw.stdout
+            | default('{"items":[]}', true)
+            | from_json
+          )['items']
+        }}
+      when:
+        - cleanup_http_routes_raw.rc == 0
+
+    - name: Delete HTTPRoute resources
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - delete
+          - httproute
+          - "{{ item.name }}"
+          - --namespace
+          - "{{ item.namespace }}"
+          - --wait=true
+          - "--timeout={{ destroy_cleanup_timeout }}s"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      loop: "{{ cleanup_http_routes }}"
+
+    # ==================================================
+    # GRPCRoute
+    # ==================================================
+
+    - name: Get GRPCRoute resources
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - grpcroute
+          - --all-namespaces
+          - -o
+          - json
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: cleanup_grpc_routes_raw
+      changed_when: false
+      failed_when: false
+
+    - name: Initialize GRPCRoute list
+      ansible.builtin.set_fact:
+        cleanup_grpc_routes: []
+
+    - name: Collect GRPCRoute resources
+      ansible.builtin.set_fact:
+        cleanup_grpc_routes: >-
+          {{
+            cleanup_grpc_routes
+            +
+            [
+              {
+                'namespace': item.metadata.namespace,
+                'name': item.metadata.name
+              }
+            ]
+          }}
+      loop: >-
+        {{
+          (
+            cleanup_grpc_routes_raw.stdout
+            | default('{"items":[]}', true)
+            | from_json
+          )['items']
+        }}
+      when:
+        - cleanup_grpc_routes_raw.rc == 0
+
+    - name: Delete GRPCRoute resources
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - delete
+          - grpcroute
+          - "{{ item.name }}"
+          - --namespace
+          - "{{ item.namespace }}"
+          - --wait=true
+          - "--timeout={{ destroy_cleanup_timeout }}s"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      loop: "{{ cleanup_grpc_routes }}"
+
+    # ==================================================
+    # Gateway
+    # ==================================================
+
+    - name: Get Gateway resources
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - gateway
+          - --all-namespaces
+          - -o
+          - json
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: cleanup_gateways_raw
+      changed_when: false
+      failed_when: false
+
+    - name: Initialize Gateway list
+      ansible.builtin.set_fact:
+        cleanup_gateways: []
+
+    - name: Collect Gateway resources
+      ansible.builtin.set_fact:
+        cleanup_gateways: >-
+          {{
+            cleanup_gateways
+            +
+            [
+              {
+                'namespace': item.metadata.namespace,
+                'name': item.metadata.name
+              }
+            ]
+          }}
+      loop: >-
+        {{
+          (
+            cleanup_gateways_raw.stdout
+            | default('{"items":[]}', true)
+            | from_json
+          )['items']
+        }}
+      when:
+        - cleanup_gateways_raw.rc == 0
+
+    - name: Delete Gateway resources
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - delete
+          - gateway
+          - "{{ item.name }}"
+          - --namespace
+          - "{{ item.namespace }}"
+          - --wait=true
+          - "--timeout={{ destroy_cleanup_timeout }}s"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      loop: "{{ cleanup_gateways }}"
+
+    # ==================================================
+    # Ingress
+    # ==================================================
+
+    - name: Get Ingress resources
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - ingress
+          - --all-namespaces
+          - -o
+          - json
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: cleanup_ingresses_raw
+      changed_when: false
+
+    - name: Initialize Ingress list
+      ansible.builtin.set_fact:
+        cleanup_ingresses: []
+
+    - name: Collect Ingress resources
+      ansible.builtin.set_fact:
+        cleanup_ingresses: >-
+          {{
+            cleanup_ingresses
+            +
+            [
+              {
+                'namespace': item.metadata.namespace,
+                'name': item.metadata.name
+              }
+            ]
+          }}
+      loop: "{{ (cleanup_ingresses_raw.stdout | from_json)['items'] }}"
+
+    - name: Delete Ingress resources
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - delete
+          - ingress
+          - "{{ item.name }}"
+          - --namespace
+          - "{{ item.namespace }}"
+          - --wait=true
+          - "--timeout={{ destroy_cleanup_timeout }}s"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      loop: "{{ cleanup_ingresses }}"
+
+    # ==================================================
+    # LoadBalancer Service
+    # ==================================================
+
+    - name: Get Service resources
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - service
+          - --all-namespaces
+          - -o
+          - json
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: cleanup_services_raw
+      changed_when: false
+
+    - name: Initialize LoadBalancer Service list
+      ansible.builtin.set_fact:
+        cleanup_load_balancer_services: []
+
+    - name: Collect LoadBalancer Services
+      ansible.builtin.set_fact:
+        cleanup_load_balancer_services: >-
+          {{
+            cleanup_load_balancer_services
+            +
+            [
+              {
+                'namespace': item.metadata.namespace,
+                'name': item.metadata.name
+              }
+            ]
+          }}
+      loop: "{{ (cleanup_services_raw.stdout | from_json)['items'] }}"
+      when:
+        - item.spec.type | default('') == 'LoadBalancer'
+
+    - name: Delete LoadBalancer Services
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - delete
+          - service
+          - "{{ item.name }}"
+          - --namespace
+          - "{{ item.namespace }}"
+          - --wait=true
+          - "--timeout={{ destroy_cleanup_timeout }}s"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      loop: "{{ cleanup_load_balancer_services }}"

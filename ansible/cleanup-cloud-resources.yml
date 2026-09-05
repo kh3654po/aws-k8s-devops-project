@@ -1,0 +1,12 @@
+---
+- name: Inspect Kubernetes-managed cloud resources
+  ansible.builtin.import_playbook: pre-destroy-check.yml
+
+- name: Cleanup AWS load balancer resources
+  ansible.builtin.import_playbook: cleanup-load-balancers.yml
+
+- name: Cleanup AWS persistent storage resources
+  ansible.builtin.import_playbook: cleanup-storage.yml
+
+- name: Validate Kubernetes-managed cloud resources are removed
+  ansible.builtin.import_playbook: post-cleanup-validation.yml
