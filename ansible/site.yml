@@ -29,5 +29,14 @@
 - name: Install ingress-nginx Ingress Controller
   ansible.builtin.import_playbook: ingress-nginx.yml
 
+- name: Install Gateway API CRDs
+  ansible.builtin.import_playbook: gateway-api-install.yml
+
 - name: Install AWS Load Balancer Controller
   ansible.builtin.import_playbook: aws-load-balancer-controller.yml
+
+- name: Install AWS EBS CSI Driver
+  ansible.builtin.import_playbook: ebs-csi-driver.yml
+
+- name: Install Kubernetes monitoring stack
+  ansible.builtin.import_playbook: monitoring.yml
