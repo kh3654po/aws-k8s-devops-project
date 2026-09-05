@@ -1,0 +1,123 @@
+---
+- name: Validate monitoring resource usage and storage
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  tasks:
+    - name: Get monitoring pods
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pods
+          - --namespace
+          - "{{ monitoring_namespace }}"
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: monitoring_resource_pods
+      changed_when: false
+
+    - name: Show monitoring pods
+      ansible.builtin.debug:
+        msg: "{{ monitoring_resource_pods.stdout_lines }}"
+
+    - name: Get monitoring pod resource usage
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - top
+          - pods
+          - --namespace
+          - "{{ monitoring_namespace }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: monitoring_resource_top
+      changed_when: false
+      failed_when: false
+
+    - name: Show monitoring pod resource usage
+      ansible.builtin.debug:
+        msg: "{{ monitoring_resource_top.stdout_lines }}"
+
+    - name: Get monitoring persistent volume claims
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pvc
+          - --namespace
+          - "{{ monitoring_namespace }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: monitoring_resource_pvc
+      changed_when: false
+      failed_when: false
+
+    - name: Show monitoring persistent volume claims
+      ansible.builtin.debug:
+        msg: "{{ monitoring_resource_pvc.stdout_lines }}"
+
+    - name: Get storage classes
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - storageclass
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: monitoring_resource_storageclass
+      changed_when: false
+
+    - name: Show storage classes
+      ansible.builtin.debug:
+        msg: "{{ monitoring_resource_storageclass.stdout_lines }}"
+
+    - name: Get Prometheus service ClusterIP
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - service
+          - kube-prometheus-stack-prometheus
+          - --namespace
+          - "{{ monitoring_namespace }}"
+          - -o
+          - "jsonpath={.spec.clusterIP}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: monitoring_resource_prometheus_ip
+      changed_when: false
+
+    - name: Query Prometheus runtime information
+      ansible.builtin.uri:
+        url: >-
+          http://{{ monitoring_resource_prometheus_ip.stdout }}:9090/api/v1/status/runtimeinfo
+        method: GET
+        return_content: true
+        status_code: 200
+      register: monitoring_resource_runtime
+      changed_when: false
+
+    - name: Query Prometheus TSDB status
+      ansible.builtin.uri:
+        url: >-
+          http://{{ monitoring_resource_prometheus_ip.stdout }}:9090/api/v1/status/tsdb
+        method: GET
+        return_content: true
+        status_code: 200
+      register: monitoring_resource_tsdb
+      changed_when: false
+
+    - name: Show Prometheus runtime information
+      ansible.builtin.debug:
+        msg: "{{ monitoring_resource_runtime.json.data }}"
+
+    - name: Show Prometheus TSDB status
+      ansible.builtin.debug:
+        msg: "{{ monitoring_resource_tsdb.json.data }}"
