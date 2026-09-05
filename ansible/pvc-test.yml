@@ -1,0 +1,63 @@
+---
+- name: Validate AWS EBS persistent storage
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  tasks:
+    - name: Get test PVC
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pvc
+          - "{{ pvc_test_name }}"
+          - --namespace
+          - "{{ pvc_test_namespace }}"
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: pvc_test_claim
+      changed_when: false
+
+    - name: Show test PVC
+      ansible.builtin.debug:
+        msg: "{{ pvc_test_claim.stdout_lines }}"
+
+    - name: Get persistent volumes
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pv
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: pvc_test_pvs
+      changed_when: false
+
+    - name: Show persistent volumes
+      ansible.builtin.debug:
+        msg: "{{ pvc_test_pvs.stdout_lines }}"
+
+    - name: Get test pods
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pods
+          - --namespace
+          - "{{ pvc_test_namespace }}"
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: pvc_test_pods
+      changed_when: false
+
+    - name: Show test pods
+      ansible.builtin.debug:
+        msg: "{{ pvc_test_pods.stdout_lines }}"

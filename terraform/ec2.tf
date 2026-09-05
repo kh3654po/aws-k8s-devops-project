@@ -94,6 +94,15 @@ resource "aws_instance" "worker" {
   vpc_security_group_ids = [aws_security_group.k8s.id]
   key_name               = var.key_name
 
+  # Worker EC2가 IAM Role을 사용할 수 있도록 Instance Profile 연결
+  iam_instance_profile = aws_iam_instance_profile.worker.name
+
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 2
+  }
+
   root_block_device {
     volume_size = 20
     volume_type = "gp3"

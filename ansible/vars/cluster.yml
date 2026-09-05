@@ -209,3 +209,22 @@ node_exporter_resources:
 alertmanager_group_wait: 30s
 alertmanager_group_interval: 5m
 alertmanager_repeat_interval: 4h
+
+# AWS EBS CSI Driver
+ebs_csi_repository_name: aws-ebs-csi-driver
+ebs_csi_repository_url: https://kubernetes-sigs.github.io/aws-ebs-csi-driver
+
+ebs_csi_chart: aws-ebs-csi-driver/aws-ebs-csi-driver
+ebs_csi_chart_version: "2.65.1"
+
+ebs_csi_release_name: aws-ebs-csi-driver
+ebs_csi_namespace: kube-system
+
+ebs_storage_class_name: ebs-gp3
+ebs_storage_type: gp3
+ebs_storage_reclaim_policy: Delete
+ebs_storage_volume_binding_mode: WaitForFirstConsumer
+
+pvc_test_namespace: storage-test
+pvc_test_name: ebs-pvc-test
+pvc_test_storage_size: 1Gi

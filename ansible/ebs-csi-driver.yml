@@ -1,0 +1,154 @@
+---
+- name: Install AWS EBS CSI Driver
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  tasks:
+    - name: Check Kubernetes administrator kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: ebs_csi_kubeconfig
+
+    - name: Fail when kubeconfig is missing
+      ansible.builtin.assert:
+        that:
+          - ebs_csi_kubeconfig.stat.exists
+        fail_msg: >-
+          Kubernetes administrator kubeconfig was not found at
+          {{ kubeconfig_path }}.
+
+    - name: Add AWS EBS CSI Driver Helm repository
+      ansible.builtin.command:
+        argv:
+          - helm
+          - repo
+          - add
+          - "{{ ebs_csi_repository_name }}"
+          - "{{ ebs_csi_repository_url }}"
+          - --force-update
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Update Helm repositories
+      ansible.builtin.command:
+        argv:
+          - helm
+          - repo
+          - update
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Install AWS EBS CSI Driver
+      ansible.builtin.command:
+        argv:
+          - helm
+          - upgrade
+          - --install
+          - "{{ ebs_csi_release_name }}"
+          - "{{ ebs_csi_chart }}"
+          - --namespace
+          - "{{ ebs_csi_namespace }}"
+          - --version
+          - "{{ ebs_csi_chart_version }}"
+          - --wait
+          - --timeout
+          - 10m
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: ebs_csi_install
+      changed_when: >-
+        'STATUS: deployed' in ebs_csi_install.stdout or
+        'has been upgraded' in ebs_csi_install.stdout
+
+    - name: Wait for EBS CSI controller rollout
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment/ebs-csi-controller
+          - --namespace
+          - "{{ ebs_csi_namespace }}"
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Wait for EBS CSI node daemonset rollout
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - daemonset/ebs-csi-node
+          - --namespace
+          - "{{ ebs_csi_namespace }}"
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Render EBS gp3 StorageClass
+      ansible.builtin.template:
+        src: ebs-storageclass.yml.j2
+        dest: /tmp/ebs-storageclass.yml
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Apply EBS gp3 StorageClass
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - -f
+          - /tmp/ebs-storageclass.yml
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: ebs_storage_class_apply
+      changed_when: >-
+        'created' in ebs_storage_class_apply.stdout or
+        'configured' in ebs_storage_class_apply.stdout
+
+    - name: Get EBS CSI driver pods
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pods
+          - --namespace
+          - "{{ ebs_csi_namespace }}"
+          - -l
+          - app.kubernetes.io/name=aws-ebs-csi-driver
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: ebs_csi_pods
+      changed_when: false
+
+    - name: Show EBS CSI driver pods
+      ansible.builtin.debug:
+        msg: "{{ ebs_csi_pods.stdout_lines }}"
+
+    - name: Get EBS StorageClass
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - storageclass
+          - "{{ ebs_storage_class_name }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: ebs_storage_class
+      changed_when: false
+
+    - name: Show EBS StorageClass
+      ansible.builtin.debug:
+        msg: "{{ ebs_storage_class.stdout_lines }}"

@@ -1,0 +1,28 @@
+---
+apiVersion: v1
+kind: Pod
+
+metadata:
+  name: pvc-test-recreated
+  namespace: storage-test
+
+spec:
+  containers:
+    - name: pvc-test
+      image: busybox:1.36
+
+      command:
+        - sh
+        - -c
+        - |
+          echo "Recreated PVC test container started"
+          sleep infinity
+
+      volumeMounts:
+        - name: persistent-storage
+          mountPath: /data
+
+  volumes:
+    - name: persistent-storage
+      persistentVolumeClaim:
+        claimName: ebs-pvc-test
