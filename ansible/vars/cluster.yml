@@ -136,8 +136,10 @@ prometheus_retention: 7d
 prometheus_scrape_interval: 30s
 prometheus_evaluation_interval: 30s
 
-prometheus_persistence_enabled: false
+prometheus_persistence_enabled: true
+# prometheus_persistence_enabled: false
 prometheus_storage_size: 10Gi
+prometheus_storage_class_name: "{{ ebs_storage_class_name }}"
 
 prometheus_resources:
   requests:
