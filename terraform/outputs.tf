@@ -49,3 +49,8 @@ output "thanos_s3_bucket_name" {
 output "thanos_s3_bucket_arn" {
   value = aws_s3_bucket.thanos.arn
 }
+
+output "thanos_s3_iam_policy_arn" {
+  description = "IAM policy ARN used by Thanos components to access S3"
+  value       = aws_iam_policy.thanos_s3.arn
+}
