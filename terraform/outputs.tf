@@ -41,3 +41,11 @@ output "worker_asg_max_size" {
 output "vpc_id" {
   value = module.vpc.vpc_id
 }
+
+output "thanos_s3_bucket_name" {
+  value = aws_s3_bucket.thanos.bucket
+}
+
+output "thanos_s3_bucket_arn" {
+  value = aws_s3_bucket.thanos.arn
+}
