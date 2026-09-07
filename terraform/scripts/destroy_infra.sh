@@ -34,6 +34,9 @@ CLEANUP_PLAYBOOK="${ANSIBLE_DIR}/cleanup-cloud-resources.yml"
 # true이면 Terraform destroy 사용자 확인 생략
 AUTO_APPROVE="${AUTO_APPROVE:-false}"
 
+# Kubernetes-managed AWS resource cleanup completion marker
+CLEANUP_MARKER="${TERRAFORM_DIR}/.k8s-cloud-cleanup-complete"
+
 # ============================================================
 # Cleanup
 # ============================================================
@@ -137,27 +140,68 @@ echo
 
 echo "[4/8] Cleaning Kubernetes-managed AWS resources..."
 
-if [[ -f "${INVENTORY_FILE}" ]]; then
-  echo "Using Ansible inventory:"
-  echo "${INVENTORY_FILE}"
+if [[ -f "${CLEANUP_MARKER}" ]]; then
+  echo "Kubernetes-managed AWS resource cleanup was already completed."
+  echo "Marker:"
+  echo "${CLEANUP_MARKER}"
   echo
+  echo "Skipping Ansible cleanup."
 
-  (
-    cd "${ANSIBLE_DIR}"
-
-  ansible-playbook \
-    -i "${INVENTORY_FILE}" \
-    "${CLEANUP_PLAYBOOK}"
-  )
-  echo
-  echo "Kubernetes-managed AWS resource cleanup completed."
-else
-  echo "WARNING: Ansible inventory was not found."
+elif [[ ! -f "${INVENTORY_FILE}" ]]; then
+  echo "ERROR: Ansible inventory was not found."
   echo "Path: ${INVENTORY_FILE}"
   echo
   echo "Unable to verify Kubernetes-managed AWS resources."
   echo "Terraform destroy has been blocked for safety."
   exit 1
+
+else
+  echo "Using Ansible inventory:"
+  echo "${INVENTORY_FILE}"
+  echo
+
+  echo "Checking Ansible connectivity to Kubernetes control plane..."
+
+  if ! (
+    cd "${ANSIBLE_DIR}"
+
+    ansible masters \
+      -i "${INVENTORY_FILE}" \
+      -m ping \
+      -o
+  ); then
+    echo
+    echo "ERROR: Ansible cannot reach the Kubernetes control plane."
+    echo
+    echo "Possible causes:"
+    echo "  - Master EC2 instance is not running"
+    echo "  - SSH key or inventory is invalid"
+    echo "  - Security Group does not allow SSH"
+    echo "  - Previous Terraform destroy already removed the master"
+    echo
+    echo "Terraform destroy has been blocked for safety."
+    exit 1
+  fi
+
+  echo
+  echo "Ansible connectivity check succeeded."
+  echo
+  echo "Cleaning Kubernetes-managed AWS resources..."
+
+  (
+    cd "${ANSIBLE_DIR}"
+
+    ansible-playbook \
+      -i "${INVENTORY_FILE}" \
+      "${CLEANUP_PLAYBOOK}"
+  )
+
+  touch "${CLEANUP_MARKER}"
+
+  echo
+  echo "Kubernetes-managed AWS resource cleanup completed."
+  echo "Created cleanup marker:"
+  echo "${CLEANUP_MARKER}"
 fi
 
 echo
@@ -249,6 +293,14 @@ if [[ -f "${INVENTORY_FILE}" ]]; then
 
   echo "Removed Ansible inventory:"
   echo "${INVENTORY_FILE}"
+  echo
+fi
+
+if [[ -f "${CLEANUP_MARKER}" ]]; then
+  rm -f "${CLEANUP_MARKER}"
+
+  echo "Removed cleanup marker:"
+  echo "${CLEANUP_MARKER}"
   echo
 fi
 
