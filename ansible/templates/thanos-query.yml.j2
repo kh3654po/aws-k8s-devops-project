@@ -33,6 +33,10 @@ spec:
 
             - --endpoint={{ thanos_sidecar_service_name }}:10901
 
+        {% if thanos_store_enabled | bool %}
+            - --endpoint={{ thanos_store_service_name }}:{{ thanos_store_grpc_port }}
+        {% endif %}
+
           ports:
             - name: http
               containerPort: {{ thanos_query_http_port }}

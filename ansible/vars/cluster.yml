@@ -274,3 +274,26 @@ thanos_query_resources:
   limits:
     cpu: 300m
     memory: 256Mi
+
+# Thanos Store Gateway
+
+thanos_store_enabled: true
+
+thanos_store_image: quay.io/thanos/thanos:v0.40.1
+
+thanos_store_replicas: 1
+
+thanos_store_service_name: thanos-store-gateway
+
+thanos_store_grpc_port: 10901
+thanos_store_http_port: 10902
+
+thanos_store_data_dir: /var/thanos/store
+
+thanos_store_resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    cpu: 300m
+    memory: 256Mi

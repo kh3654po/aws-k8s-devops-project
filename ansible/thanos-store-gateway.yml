@@ -1,0 +1,91 @@
+---
+- name: Install Thanos Store Gateway
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  tasks:
+    - name: Check Kubernetes administrator kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: thanos_store_kubeconfig
+
+    - name: Fail when Kubernetes control plane is not initialized
+      ansible.builtin.assert:
+        that:
+          - thanos_store_kubeconfig.stat.exists
+        fail_msg: >-
+          Kubernetes administrator kubeconfig was not found at
+          {{ kubeconfig_path }}.
+
+    - name: Check Thanos object storage Secret
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - secret
+          - "{{ thanos_object_storage_secret_name }}"
+          - --namespace
+          - "{{ monitoring_namespace }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: thanos_store_secret
+      changed_when: false
+
+    - name: Render Thanos Store Gateway manifest
+      ansible.builtin.template:
+        src: templates/thanos-store-gateway.yml.j2
+        dest: /tmp/thanos-store-gateway.yml
+        mode: "0644"
+
+    - name: Apply Thanos Store Gateway
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - -f
+          - /tmp/thanos-store-gateway.yml
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: thanos_store_apply
+      changed_when: >-
+        'created' in thanos_store_apply.stdout or
+        'configured' in thanos_store_apply.stdout
+
+    - name: Wait for Thanos Store Gateway rollout
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment/{{ thanos_store_service_name }}
+          - --namespace
+          - "{{ monitoring_namespace }}"
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Get Thanos Store Gateway Pods
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pod
+          - --namespace
+          - "{{ monitoring_namespace }}"
+          - -l
+          - app.kubernetes.io/name=thanos-store
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: thanos_store_pods
+      changed_when: false
+
+    - name: Display Thanos Store Gateway Pods
+      ansible.builtin.debug:
+        var: thanos_store_pods.stdout_lines
