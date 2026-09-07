@@ -241,3 +241,16 @@ destroy_cleanup_namespaces:
   - storage-test
 
 destroy_cleanup_timeout: 300
+
+# Thanos
+thanos_enabled: true
+
+thanos_object_storage_secret_name: thanos-objstore-config
+thanos_object_storage_secret_key: objstore.yml
+
+thanos_s3_bucket_name: ""
+thanos_s3_region: "{{ aws_region }}"
+thanos_s3_endpoint: "s3.{{ aws_region }}.amazonaws.com"
+
+thanos_external_labels:
+  cluster: "{{ cluster_name }}"

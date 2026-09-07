@@ -64,6 +64,11 @@ prometheus:
     enabled: false
 
   prometheusSpec:
+    externalLabels:
+    {% for key, value in thanos_external_labels.items() %}
+      {{ key }}: "{{ value }}"
+    {% endfor %}
+
     replicas: {{ prometheus_replicas }}
 
     retention: "{{ prometheus_retention }}"
@@ -83,6 +88,14 @@ prometheus:
       limits:
         cpu: "{{ prometheus_resources.limits.cpu }}"
         memory: "{{ prometheus_resources.limits.memory }}"
+
+{% if thanos_enabled %}
+    thanos:
+      objectStorageConfig:
+        existingSecret:
+          name: "{{ thanos_object_storage_secret_name }}"
+          key: "{{ thanos_object_storage_secret_key }}"
+{% endif %}
 
 {% if prometheus_persistence_enabled %}
     storageSpec:

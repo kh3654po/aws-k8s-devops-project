@@ -126,6 +126,38 @@
       ansible.builtin.debug:
         msg: "{{ monitoring_chart_information.stdout_lines }}"
 
+    - name: Validate Thanos S3 bucket configuration
+      ansible.builtin.assert:
+        that:
+          - thanos_s3_bucket_name is defined
+          - thanos_s3_bucket_name | length > 0
+        fail_msg: >-
+          Thanos S3 bucket name is empty.
+          Provide thanos_s3_bucket_name from Terraform output.
+      when: thanos_enabled
+
+    - name: Render Thanos object storage Secret manifest
+      ansible.builtin.template:
+        src: templates/thanos-objstore-secret.yml.j2
+        dest: /tmp/thanos-objstore-secret.yml
+        mode: "0600"
+      when: thanos_enabled
+
+    - name: Apply Thanos object storage Secret
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - -f
+          - /tmp/thanos-objstore-secret.yml
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: thanos_object_storage_secret
+      changed_when: >-
+        'created' in thanos_object_storage_secret.stdout or
+        'configured' in thanos_object_storage_secret.stdout
+      when: thanos_enabled
+
     - name: Render kube-prometheus-stack Helm values
       ansible.builtin.template:
         src: kube-prometheus-stack-values.yml.j2
