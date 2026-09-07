@@ -40,3 +40,6 @@
 
 - name: Install Kubernetes monitoring stack
   ansible.builtin.import_playbook: monitoring.yml
+
+- name: Install Thanos Query
+  ansible.builtin.import_playbook: thanos-query.yml

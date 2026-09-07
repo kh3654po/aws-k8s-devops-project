@@ -63,12 +63,17 @@ prometheus:
   ingress:
     enabled: false
 
+{% if thanos_enabled | bool %}
+  thanosService:
+    enabled: true
+{% endif %}
+
   prometheusSpec:
     externalLabels:
     {% for key, value in thanos_external_labels.items() %}
       {{ key }}: "{{ value }}"
     {% endfor %}
-
+    
     replicas: {{ prometheus_replicas }}
 
     retention: "{{ prometheus_retention }}"

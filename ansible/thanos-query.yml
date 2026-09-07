@@ -1,0 +1,78 @@
+---
+- name: Install Thanos Query
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  tasks:
+    - name: Check Kubernetes administrator kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: thanos_query_kubeconfig
+
+    - name: Fail when Kubernetes control plane is not initialized
+      ansible.builtin.assert:
+        that:
+          - thanos_query_kubeconfig.stat.exists
+        fail_msg: >-
+          Kubernetes administrator kubeconfig was not found at
+          {{ kubeconfig_path }}.
+
+    - name: Render Thanos Query manifest
+      ansible.builtin.template:
+        src: templates/thanos-query.yml.j2
+        dest: /tmp/thanos-query.yml
+        mode: "0644"
+
+    - name: Apply Thanos Query
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - -f
+          - /tmp/thanos-query.yml
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: thanos_query_apply
+
+      changed_when: >-
+        'created' in thanos_query_apply.stdout or
+        'configured' in thanos_query_apply.stdout
+
+    - name: Wait for Thanos Query rollout
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment/{{ thanos_query_service_name }}
+          - --namespace
+          - "{{ monitoring_namespace }}"
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Get Thanos Query Pods
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pods
+          - --namespace
+          - "{{ monitoring_namespace }}"
+          - -l
+          - app.kubernetes.io/name=thanos-query
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: thanos_query_pods
+      changed_when: false
+
+    - name: Display Thanos Query Pods
+      ansible.builtin.debug:
+        var: thanos_query_pods.stdout_lines

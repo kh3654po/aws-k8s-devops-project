@@ -1,0 +1,88 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ thanos_query_service_name }}
+  namespace: {{ monitoring_namespace }}
+  labels:
+    app.kubernetes.io/name: thanos-query
+
+spec:
+  replicas: {{ thanos_query_replicas }}
+
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: thanos-query
+
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: thanos-query
+
+    spec:
+      containers:
+        - name: thanos-query
+          image: "{{ thanos_query_image }}"
+          imagePullPolicy: IfNotPresent
+
+          args:
+            - query
+
+            - --http-address=0.0.0.0:{{ thanos_query_http_port }}
+
+            - --grpc-address=0.0.0.0:{{ thanos_query_grpc_port }}
+
+            - --endpoint={{ thanos_sidecar_service_name }}:10901
+
+          ports:
+            - name: http
+              containerPort: {{ thanos_query_http_port }}
+
+            - name: grpc
+              containerPort: {{ thanos_query_grpc_port }}
+
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+
+          resources:
+            requests:
+              cpu: "{{ thanos_query_resources.requests.cpu }}"
+              memory: "{{ thanos_query_resources.requests.memory }}"
+
+            limits:
+              cpu: "{{ thanos_query_resources.limits.cpu }}"
+              memory: "{{ thanos_query_resources.limits.memory }}"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ thanos_query_service_name }}
+  namespace: {{ monitoring_namespace }}
+  labels:
+    app.kubernetes.io/name: thanos-query
+
+spec:
+  type: ClusterIP
+
+  selector:
+    app.kubernetes.io/name: thanos-query
+
+  ports:
+    - name: http
+      port: {{ thanos_query_http_port }}
+      targetPort: http
+
+    - name: grpc
+      port: {{ thanos_query_grpc_port }}
+      targetPort: grpc
