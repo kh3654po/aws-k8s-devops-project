@@ -1,0 +1,91 @@
+---
+- name: Install Thanos Compactor
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  tasks:
+    - name: Check Kubernetes administrator kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: thanos_compactor_kubeconfig
+
+    - name: Fail when Kubernetes control plane is not initialized
+      ansible.builtin.assert:
+        that:
+          - thanos_compactor_kubeconfig.stat.exists
+        fail_msg: >-
+          Kubernetes administrator kubeconfig was not found at
+          {{ kubeconfig_path }}.
+
+    - name: Check Thanos object storage Secret
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - secret
+          - "{{ thanos_object_storage_secret_name }}"
+          - --namespace
+          - "{{ monitoring_namespace }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: thanos_compactor_secret
+      changed_when: false
+
+    - name: Render Thanos Compactor manifest
+      ansible.builtin.template:
+        src: templates/thanos-compactor.yml.j2
+        dest: /tmp/thanos-compactor.yml
+        mode: "0644"
+
+    - name: Apply Thanos Compactor
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - -f
+          - /tmp/thanos-compactor.yml
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: thanos_compactor_apply
+      changed_when: >-
+        'created' in thanos_compactor_apply.stdout or
+        'configured' in thanos_compactor_apply.stdout
+
+    - name: Wait for Thanos Compactor rollout
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment/{{ thanos_compactor_service_name }}
+          - --namespace
+          - "{{ monitoring_namespace }}"
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Get Thanos Compactor Pods
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pod
+          - --namespace
+          - "{{ monitoring_namespace }}"
+          - -l
+          - app.kubernetes.io/name=thanos-compactor
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: thanos_compactor_pods
+      changed_when: false
+
+    - name: Display Thanos Compactor Pods
+      ansible.builtin.debug:
+        var: thanos_compactor_pods.stdout_lines

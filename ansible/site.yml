@@ -46,3 +46,6 @@
 
 - name: Install Thanos Query
   ansible.builtin.import_playbook: thanos-query.yml
+
+- name: Install Thanos Compactor
+  ansible.builtin.import_playbook: thanos-compactor.yml

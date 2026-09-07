@@ -297,3 +297,29 @@ thanos_store_resources:
   limits:
     cpu: 300m
     memory: 256Mi
+
+  # Thanos Compactor
+
+thanos_compactor_enabled: true
+
+thanos_compactor_image: quay.io/thanos/thanos:v0.40.1
+
+thanos_compactor_replicas: 1
+
+thanos_compactor_service_name: thanos-compactor
+
+thanos_compactor_http_port: 10902
+
+thanos_compactor_data_dir: /var/thanos/compact
+
+thanos_compactor_retention_raw: 30d
+thanos_compactor_retention_5m: 90d
+thanos_compactor_retention_1h: 365d
+
+thanos_compactor_resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
