@@ -145,11 +145,10 @@ if [[ -f "${INVENTORY_FILE}" ]]; then
   (
     cd "${ANSIBLE_DIR}"
 
-    ansible-playbook \
-      -i "${INVENTORY_FILE}" \
-      cleanup-cloud-resources.yml
+  ansible-playbook \
+    -i "${INVENTORY_FILE}" \
+    "${CLEANUP_PLAYBOOK}"
   )
-
   echo
   echo "Kubernetes-managed AWS resource cleanup completed."
 else
