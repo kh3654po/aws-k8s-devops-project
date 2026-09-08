@@ -275,7 +275,6 @@ thanos_query_resources:
     memory: 256Mi
 
 # Thanos Store Gateway
-
 thanos_store_enabled: true
 
 thanos_store_image: quay.io/thanos/thanos:v0.40.1
@@ -331,3 +330,24 @@ grafana_thanos_datasource_uid: thanos
 
 grafana_thanos_datasource_url: >-
   http://{{ thanos_query_service_name }}.{{ monitoring_namespace }}.svc.cluster.local:{{ thanos_query_http_port }}
+
+# Loki
+loki_enabled: true
+
+loki_namespace: "{{ monitoring_namespace }}"
+
+loki_repository_name: grafana-community
+loki_repository_url: https://grafana-community.github.io/helm-charts
+
+loki_chart: grafana-community/loki
+loki_chart_version: "18.12.1"
+
+loki_release_name: loki
+
+loki_values_remote_path: /tmp/loki-values.yml
+
+loki_deployment_mode: Monolithic
+loki_replicas: 1
+
+loki_http_port: 3100
+loki_auth_enabled: false

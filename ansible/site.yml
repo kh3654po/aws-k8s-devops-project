@@ -49,3 +49,6 @@
 
 - name: Install Thanos Compactor
   ansible.builtin.import_playbook: thanos-compactor.yml
+
+- name: Install Loki logging stack
+  ansible.builtin.import_playbook: loki.yml
