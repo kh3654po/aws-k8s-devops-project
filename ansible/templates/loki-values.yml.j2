@@ -26,7 +26,11 @@ singleBinary:
   replicas: {{ loki_replicas }}
 
   persistence:
-    enabled: false
+    enabled: {{ loki_persistence_enabled }}
+    storageClass: "{{ loki_storage_class_name }}"
+    accessModes:
+      - ReadWriteOnce
+    size: "{{ loki_storage_size }}"
 
 chunksCache:
   enabled: false

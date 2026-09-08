@@ -351,3 +351,7 @@ loki_replicas: 1
 
 loki_http_port: 3100
 loki_auth_enabled: false
+
+loki_persistence_enabled: true
+loki_storage_class_name: "{{ ebs_storage_class_name }}"
+loki_storage_size: 10Gi
