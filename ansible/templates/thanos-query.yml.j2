@@ -26,16 +26,12 @@ spec:
 
           args:
             - query
-
             - --http-address=0.0.0.0:{{ thanos_query_http_port }}
-
             - --grpc-address=0.0.0.0:{{ thanos_query_grpc_port }}
-
             - --endpoint={{ thanos_sidecar_service_name }}:10901
-
-        {% if thanos_store_enabled | bool %}
+{% if thanos_store_enabled | bool %}
             - --endpoint={{ thanos_store_service_name }}:{{ thanos_store_grpc_port }}
-        {% endif %}
+{% endif %}
 
           ports:
             - name: http
