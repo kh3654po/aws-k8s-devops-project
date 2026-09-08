@@ -52,3 +52,6 @@
 
 - name: Install Loki logging stack
   ansible.builtin.import_playbook: loki.yml
+
+- name: Install Grafana Alloy
+  ansible.builtin.import_playbook: alloy.yml

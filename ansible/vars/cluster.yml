@@ -355,3 +355,24 @@ loki_auth_enabled: false
 loki_persistence_enabled: true
 loki_storage_class_name: "{{ ebs_storage_class_name }}"
 loki_storage_size: 10Gi
+
+# Grafana Alloy
+alloy_enabled: true
+
+alloy_namespace: "{{ monitoring_namespace }}"
+
+alloy_repository_name: grafana
+alloy_repository_url: https://grafana.github.io/helm-charts
+
+alloy_chart: grafana/alloy
+alloy_chart_version: "1.12.1"
+
+alloy_release_name: alloy
+
+alloy_values_remote_path: /tmp/alloy-values.yml
+
+alloy_controller_type: daemonset
+
+alloy_http_port: 12345
+
+alloy_enable_reporting: false

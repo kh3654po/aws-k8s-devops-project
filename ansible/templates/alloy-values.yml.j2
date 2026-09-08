@@ -1,0 +1,16 @@
+# Grafana Alloy Helm Values
+
+controller:
+  type: {{ alloy_controller_type }}
+
+alloy:
+  enableReporting: {{ alloy_enable_reporting }}
+
+  configMap:
+    create: true
+
+    content: |-
+      logging {
+        level  = "info"
+        format = "logfmt"
+      }
