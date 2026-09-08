@@ -323,3 +323,12 @@ thanos_compactor_resources:
   limits:
     cpu: 500m
     memory: 512Mi
+
+# Grafana Thanos DataSource
+grafana_thanos_datasource_enabled: true
+
+grafana_thanos_datasource_name: Thanos
+grafana_thanos_datasource_uid: thanos
+
+grafana_thanos_datasource_url: >-
+  http://{{ thanos_query_service_name }}.{{ monitoring_namespace }}.svc.cluster.local:{{ thanos_query_http_port }}

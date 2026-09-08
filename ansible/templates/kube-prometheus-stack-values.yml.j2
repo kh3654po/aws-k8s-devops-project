@@ -7,6 +7,26 @@ defaultRules:
 grafana:
   enabled: true
 
+{% if grafana_thanos_datasource_enabled | bool %}
+  sidecar:
+    datasources:
+      enabled: true
+      defaultDatasourceEnabled: true
+      isDefaultDatasource: false
+
+  additionalDataSources:
+    - name: "{{ grafana_thanos_datasource_name }}"
+      uid: "{{ grafana_thanos_datasource_uid }}"
+      type: prometheus
+      access: proxy
+      url: "{{ grafana_thanos_datasource_url }}"
+      isDefault: true
+      editable: false
+      jsonData:
+        httpMethod: POST
+        timeInterval: "{{ prometheus_scrape_interval }}"
+{% endif %}
+
   replicas: {{ grafana_replicas }}
 
   adminUser: "{{ grafana_admin_user }}"
@@ -35,13 +55,6 @@ grafana:
     limits:
       cpu: "{{ grafana_resources.limits.cpu }}"
       memory: "{{ grafana_resources.limits.memory }}"
-
-  sidecar:
-    dashboards:
-      enabled: true
-
-    datasources:
-      enabled: true
 
 prometheusOperator:
   enabled: true
@@ -122,6 +135,26 @@ alertmanager:
   alertmanagerSpec:
     replicas: {{ alertmanager_replicas }}
 
+    resources:
+      requests:
+        cpu: "{{ alertmanager_resources.requests.cpu }}"
+        memory: "{{ alertmanager_resources.requests.memory }}"
+      limits:
+        cpu: "{{ alertmanager_resources.limits.cpu }}"
+        memory: "{{ alertmanager_resources.limits.memory }}"
+
+{% if alertmanager_persistence_enabled | bool %}
+    storage:
+      volumeClaimTemplate:
+        spec:
+          accessModes:
+            - ReadWriteOnce
+
+          resources:
+            requests:
+              storage: "{{ alertmanager_storage_size }}"
+{% endif %}
+
 {% if alertmanager_persistence_enabled %}
     storage:
       volumeClaimTemplate:
@@ -167,29 +200,6 @@ alertmanager:
 
   ingress:
     enabled: false
-
-  alertmanagerSpec:
-    replicas: {{ alertmanager_replicas }}
-
-    resources:
-      requests:
-        cpu: "{{ alertmanager_resources.requests.cpu }}"
-        memory: "{{ alertmanager_resources.requests.memory }}"
-      limits:
-        cpu: "{{ alertmanager_resources.limits.cpu }}"
-        memory: "{{ alertmanager_resources.limits.memory }}"
-
-{% if alertmanager_persistence_enabled | bool %}
-    storage:
-      volumeClaimTemplate:
-        spec:
-          accessModes:
-            - ReadWriteOnce
-
-          resources:
-            requests:
-              storage: "{{ alertmanager_storage_size }}"
-{% endif %}
 
 kube-state-metrics:
   enabled: true
