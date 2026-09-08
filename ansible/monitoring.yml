@@ -6,6 +6,7 @@
 
   vars_files:
     - vars/cluster.yml
+    - vars/terraform.yml
 
   tasks:
     - name: Check Kubernetes administrator kubeconfig

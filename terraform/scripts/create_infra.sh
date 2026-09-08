@@ -50,7 +50,7 @@ echo "Project root        : ${PROJECT_ROOT}"
 echo
 
 # 현재 공인 IP 조회
-echo "[1/7] Detecting current public IP..."
+echo "[1/8] Detecting current public IP..."
 
 MY_IP="$(
   curl -fsS https://checkip.amazonaws.com |
@@ -68,28 +68,28 @@ echo "Current public IP: ${MY_IP_CIDR}"
 echo
 
 # Terraform 초기화
-echo "[2/7] Initializing Terraform..."
+echo "[2/8] Initializing Terraform..."
 
 terraform -chdir="${TERRAFORM_DIR}" init
 
 echo
 
 # Terraform 파일 포맷
-echo "[3/7] Formatting Terraform files..."
+echo "[3/8] Formatting Terraform files..."
 
 terraform -chdir="${TERRAFORM_DIR}" fmt -recursive
 
 echo
 
 # Terraform 구성 검증
-echo "[4/7] Validating Terraform configuration..."
+echo "[4/8] Validating Terraform configuration..."
 
 terraform -chdir="${TERRAFORM_DIR}" validate
 
 echo
 
 # Terraform 실행 계획 생성
-echo "[5/7] Creating Terraform execution plan..."
+echo "[5/8] Creating Terraform execution plan..."
 
 terraform -chdir="${TERRAFORM_DIR}" plan \
   -out="${PLAN_FILE}" \
@@ -98,7 +98,7 @@ terraform -chdir="${TERRAFORM_DIR}" plan \
 echo
 
 # Terraform 적용
-echo "[6/7] Applying Terraform execution plan..."
+echo "[6/8] Applying Terraform execution plan..."
 
 terraform -chdir="${TERRAFORM_DIR}" apply \
   "${PLAN_FILE}"
@@ -106,9 +106,14 @@ terraform -chdir="${TERRAFORM_DIR}" apply \
 echo
 
 # Ansible Inventory 생성
-echo "[7/7] Generating Ansible inventory..."
+echo "[7/8] Generating Ansible inventory..."
 
 "${INVENTORY_SCRIPT}"
+
+# Generate Ansible Variables
+echo "[8/8] Generate Ansible Variables"
+
+"${SCRIPT_DIR}/generate_ansible_vars.sh"
 
 echo
 echo "========================================"

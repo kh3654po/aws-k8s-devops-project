@@ -37,6 +37,9 @@ AUTO_APPROVE="${AUTO_APPROVE:-false}"
 # Kubernetes-managed AWS resource cleanup completion marker
 CLEANUP_MARKER="${TERRAFORM_DIR}/.k8s-cloud-cleanup-complete"
 
+# Ansible variables file generated from Terraform output
+GENERATED_ANSIBLE_VARS_FILE="${ANSIBLE_DIR}/vars/terraform.yml"
+
 # ============================================================
 # Cleanup
 # ============================================================
@@ -301,6 +304,14 @@ if [[ -f "${CLEANUP_MARKER}" ]]; then
 
   echo "Removed cleanup marker:"
   echo "${CLEANUP_MARKER}"
+  echo
+fi
+
+if [[ -f "${GENERATED_ANSIBLE_VARS_FILE}" ]]; then
+  rm -f "${GENERATED_ANSIBLE_VARS_FILE}"
+
+  echo "Removed generated Ansible variables:"
+  echo "${GENERATED_ANSIBLE_VARS_FILE}"
   echo
 fi
 
