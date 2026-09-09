@@ -376,3 +376,11 @@ alloy_controller_type: daemonset
 alloy_http_port: 12345
 
 alloy_enable_reporting: false
+
+# Grafana Alloy Pod Logs
+alloy_mount_varlog: true
+
+alloy_cluster_name: "{{ cluster_name }}"
+
+alloy_loki_write_url: >-
+  http://{{ loki_release_name }}-gateway.{{ loki_namespace }}.svc.cluster.local/loki/api/v1/push
