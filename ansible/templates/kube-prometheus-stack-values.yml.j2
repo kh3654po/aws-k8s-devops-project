@@ -7,7 +7,6 @@ defaultRules:
 grafana:
   enabled: true
 
-{% if grafana_thanos_datasource_enabled | bool %}
   sidecar:
     datasources:
       enabled: true
@@ -15,6 +14,7 @@ grafana:
       isDefaultDatasource: false
 
   additionalDataSources:
+{% if grafana_thanos_datasource_enabled %}
     - name: "{{ grafana_thanos_datasource_name }}"
       uid: "{{ grafana_thanos_datasource_uid }}"
       type: prometheus
@@ -25,6 +25,16 @@ grafana:
       jsonData:
         httpMethod: POST
         timeInterval: "{{ prometheus_scrape_interval }}"
+{% endif %}
+
+{% if grafana_loki_datasource_enabled %}
+    - name: "{{ grafana_loki_datasource_name }}"
+      uid: "{{ grafana_loki_datasource_uid }}"
+      type: loki
+      access: proxy
+      url: "{{ grafana_loki_datasource_url }}"
+      isDefault: false
+      editable: false
 {% endif %}
 
   replicas: {{ grafana_replicas }}
@@ -76,7 +86,7 @@ prometheus:
   ingress:
     enabled: false
 
-{% if thanos_enabled | bool %}
+{% if thanos_enabled %}
   thanosService:
     enabled: true
 {% endif %}

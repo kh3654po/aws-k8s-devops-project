@@ -234,7 +234,6 @@ pvc_test_storage_size: 1Gi
 # ========================================
 # Pre-destroy cleanup
 # ========================================
-
 destroy_cleanup_namespaces:
   - monitoring
   - monitoring-app
@@ -296,8 +295,7 @@ thanos_store_resources:
     cpu: 300m
     memory: 256Mi
 
-  # Thanos Compactor
-
+# Thanos Compactor
 thanos_compactor_enabled: true
 
 thanos_compactor_image: quay.io/thanos/thanos:v0.40.1
@@ -404,3 +402,13 @@ alloy_events_cluster_name: "{{ cluster_name }}"
 
 alloy_events_loki_write_url: >-
   http://{{ loki_release_name }}-gateway.{{ loki_namespace }}.svc.cluster.local/loki/api/v1/push
+
+# Grafana Loki DataSource
+grafana_loki_datasource_enabled: true
+
+grafana_loki_datasource_name: Loki
+
+grafana_loki_datasource_uid: loki
+
+grafana_loki_datasource_url: >-
+  http://{{ loki_release_name }}-gateway.{{ loki_namespace }}.svc.cluster.local
