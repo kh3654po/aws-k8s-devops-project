@@ -1,0 +1,87 @@
+---
+- name: Deploy Kubernetes failure test workloads
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  tasks:
+    - name: Check Kubernetes administrator kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: failure_test_kubeconfig
+
+    - name: Fail when Kubernetes control plane is not initialized
+      ansible.builtin.assert:
+        that:
+          - failure_test_kubeconfig.stat.exists
+        fail_msg: >-
+          Kubernetes administrator kubeconfig was not found at
+          {{ kubeconfig_path }}.
+        success_msg: Kubernetes administrator kubeconfig was found.
+
+    - name: Copy failure test file
+      ansible.builtin.copy:
+        src: files/failure-test.yml
+        dest: /tmp/failure-test.yml
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Apply failure test file
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - -f
+          - /tmp/failure-test.yml
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: failure_test_apply
+
+    - name: Show failure test apply result
+      ansible.builtin.debug:
+        msg: "{{ failure_test_apply.stdout_lines }}"
+
+    - name: Wait for failure events to be generated
+      ansible.builtin.pause:
+        seconds: 30
+
+    - name: Get failure test pods
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pods
+          - --namespace
+          - failure-test
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: failure_test_pods
+      changed_when: false
+
+    - name: Get failure test events
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - events
+          - --namespace
+          - failure-test
+          - --sort-by=.lastTimestamp
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: failure_test_events
+      changed_when: false
+
+    - name: Show failure test pods
+      ansible.builtin.debug:
+        msg: "{{ failure_test_pods.stdout_lines }}"
+
+    - name: Show failure test events
+      ansible.builtin.debug:
+        msg: "{{ failure_test_events.stdout_lines }}"
