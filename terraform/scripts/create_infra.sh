@@ -117,11 +117,40 @@ echo "[8/8] Generate Ansible Variables"
 
 echo
 echo "========================================"
+echo "Waiting for Ansible connectivity"
+echo "========================================"
+
+MAX_RETRIES=10
+RETRY_INTERVAL=3
+
+for ((attempt=1; attempt<=MAX_RETRIES; attempt++)); do
+  echo
+  echo "Ansible connectivity check ${attempt}/${MAX_RETRIES}..."
+
+  if ansible all -m ping; then
+    echo
+    echo "All hosts are reachable by Ansible."
+    break
+  fi
+
+  if (( attempt == MAX_RETRIES )); then
+    echo
+    echo "Error: Ansible connectivity check failed after ${MAX_RETRIES} attempts."
+    exit 1
+  fi
+
+  echo "Hosts are not ready yet. Retrying in ${RETRY_INTERVAL} seconds..."
+  sleep "${RETRY_INTERVAL}"
+done
+
+echo
+echo "========================================"
+echo "Running Ansible site playbook"
+echo "========================================"
+
+ansible-playbook site.yml
+
+echo
+echo "========================================"
 echo "Infrastructure creation completed"
 echo "========================================"
-echo
-echo "Next commands:"
-echo
-echo "  cd ${PROJECT_ROOT}/ansible"
-echo "  ansible all -m ping"
-echo "  ansible-playbook site.yml"
