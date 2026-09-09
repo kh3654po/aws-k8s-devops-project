@@ -1,0 +1,231 @@
+---
+- name: Install Grafana Alloy Kubernetes event collector
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  tasks:
+    - name: Check Kubernetes administrator kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: alloy_events_kubeconfig
+
+    - name: Fail when Kubernetes control plane is not initialized
+      ansible.builtin.assert:
+        that:
+          - alloy_events_kubeconfig.stat.exists
+        fail_msg: >-
+          Kubernetes administrator kubeconfig was not found at
+          {{ kubeconfig_path }}.
+        success_msg: Kubernetes administrator kubeconfig was found.
+
+    - name: Check Helm installation
+      ansible.builtin.command:
+        argv:
+          - helm
+          - version
+          - --short
+      register: alloy_events_helm_version
+      changed_when: false
+
+    - name: Show Helm version
+      ansible.builtin.debug:
+        msg: "{{ alloy_events_helm_version.stdout }}"
+
+    - name: Check monitoring namespace
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - namespace
+          - "{{ alloy_events_namespace }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: alloy_events_namespace_status
+      changed_when: false
+      failed_when: false
+
+    - name: Create monitoring namespace
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - create
+          - namespace
+          - "{{ alloy_events_namespace }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      when: alloy_events_namespace_status.rc != 0
+
+    - name: Add Grafana Helm repository
+      ansible.builtin.command:
+        argv:
+          - helm
+          - repo
+          - add
+          - "{{ alloy_repository_name }}"
+          - "{{ alloy_repository_url }}"
+          - --force-update
+      register: alloy_events_helm_repository
+      changed_when: >-
+        'has been added' in alloy_events_helm_repository.stdout
+
+    - name: Update Helm repositories
+      ansible.builtin.command:
+        argv:
+          - helm
+          - repo
+          - update
+      changed_when: false
+
+    - name: Validate Alloy chart version
+      ansible.builtin.assert:
+        that:
+          - alloy_chart_version is defined
+          - alloy_chart_version | length > 0
+        fail_msg: >-
+          Grafana Alloy chart version is empty.
+          Configure alloy_chart_version in vars/cluster.yml.
+
+    - name: Verify Alloy chart version
+      ansible.builtin.command:
+        argv:
+          - helm
+          - show
+          - chart
+          - "{{ alloy_chart }}"
+          - --version
+          - "{{ alloy_chart_version }}"
+      register: alloy_events_chart_information
+      changed_when: false
+
+    - name: Show Alloy chart information
+      ansible.builtin.debug:
+        msg: "{{ alloy_events_chart_information.stdout_lines }}"
+
+    - name: Render Alloy event collector Helm values
+      ansible.builtin.template:
+        src: templates/alloy-events-values.yml.j2
+        dest: "{{ alloy_events_values_remote_path }}"
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Validate Alloy event collector Helm template
+      ansible.builtin.command:
+        argv:
+          - helm
+          - template
+          - "{{ alloy_events_release_name }}"
+          - "{{ alloy_chart }}"
+          - --version
+          - "{{ alloy_chart_version }}"
+          - --namespace
+          - "{{ alloy_events_namespace }}"
+          - --values
+          - "{{ alloy_events_values_remote_path }}"
+      changed_when: false
+
+    - name: Install or upgrade Alloy event collector
+      ansible.builtin.command:
+        argv:
+          - helm
+          - upgrade
+          - --install
+          - "{{ alloy_events_release_name }}"
+          - "{{ alloy_chart }}"
+          - --version
+          - "{{ alloy_chart_version }}"
+          - --namespace
+          - "{{ alloy_events_namespace }}"
+          - --values
+          - "{{ alloy_events_values_remote_path }}"
+          - --wait
+          - --atomic
+          - --timeout
+          - 10m
+          - --history-max
+          - "10"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: alloy_events_helm_install
+
+    - name: Show Helm installation result
+      ansible.builtin.debug:
+        msg: "{{ alloy_events_helm_install.stdout_lines }}"
+
+    - name: Wait for Alloy event collector rollout
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment
+          - "{{ alloy_events_release_name }}"
+          - --namespace
+          - "{{ alloy_events_namespace }}"
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Get Alloy event collector deployment
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - deployment
+          - --namespace
+          - "{{ alloy_events_namespace }}"
+          - -l
+          - "app.kubernetes.io/instance={{ alloy_events_release_name }}"
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: alloy_events_deployment
+      changed_when: false
+
+    - name: Get Alloy event collector pods
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pods
+          - --namespace
+          - "{{ alloy_events_namespace }}"
+          - -l
+          - "app.kubernetes.io/instance={{ alloy_events_release_name }}"
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: alloy_events_pods
+      changed_when: false
+
+    - name: Get Helm release status
+      ansible.builtin.command:
+        argv:
+          - helm
+          - status
+          - "{{ alloy_events_release_name }}"
+          - --namespace
+          - "{{ alloy_events_namespace }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: alloy_events_helm_status
+      changed_when: false
+
+    - name: Show Alloy event collector deployment
+      ansible.builtin.debug:
+        msg: "{{ alloy_events_deployment.stdout_lines }}"
+
+    - name: Show Alloy event collector pods
+      ansible.builtin.debug:
+        msg: "{{ alloy_events_pods.stdout_lines }}"
+
+    - name: Show Helm release status
+      ansible.builtin.debug:
+        msg: "{{ alloy_events_helm_status.stdout_lines }}"

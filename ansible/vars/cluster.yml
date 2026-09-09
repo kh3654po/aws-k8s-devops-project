@@ -384,3 +384,23 @@ alloy_cluster_name: "{{ cluster_name }}"
 
 alloy_loki_write_url: >-
   http://{{ loki_release_name }}-gateway.{{ loki_namespace }}.svc.cluster.local/loki/api/v1/push
+
+# Grafana Alloy - Kubernetes Events
+alloy_events_enabled: true
+
+alloy_events_namespace: "{{ monitoring_namespace }}"
+
+alloy_events_release_name: alloy-events
+
+alloy_events_values_remote_path: /tmp/alloy-events-values.yml
+
+alloy_events_controller_type: deployment
+alloy_events_replicas: 1
+
+alloy_events_job_name: kubernetes-events
+alloy_events_log_format: logfmt
+
+alloy_events_cluster_name: "{{ cluster_name }}"
+
+alloy_events_loki_write_url: >-
+  http://{{ loki_release_name }}-gateway.{{ loki_namespace }}.svc.cluster.local/loki/api/v1/push

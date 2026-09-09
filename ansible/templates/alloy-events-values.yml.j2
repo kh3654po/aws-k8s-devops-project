@@ -1,0 +1,44 @@
+# Grafana Alloy Kubernetes Events Helm Values
+
+controller:
+  type: {{ alloy_events_controller_type }}
+  replicas: {{ alloy_events_replicas }}
+
+alloy:
+  enableReporting: {{ alloy_enable_reporting }}
+
+  configMap:
+    create: true
+
+    content: |-
+      logging {
+        level  = "info"
+        format = "logfmt"
+      }
+
+      loki.source.kubernetes_events "cluster_events" {
+        job_name   = "{{ alloy_events_job_name }}"
+        log_format = "{{ alloy_events_log_format }}"
+
+        forward_to = [
+          loki.process.cluster_events.receiver,
+        ]
+      }
+
+      loki.process "cluster_events" {
+        stage.static_labels {
+          values = {
+            cluster = "{{ alloy_events_cluster_name }}",
+          }
+        }
+
+        forward_to = [
+          loki.write.default.receiver,
+        ]
+      }
+
+      loki.write "default" {
+        endpoint {
+          url = "{{ alloy_events_loki_write_url }}"
+        }
+      }

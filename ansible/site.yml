@@ -55,3 +55,6 @@
 
 - name: Install Grafana Alloy
   ansible.builtin.import_playbook: alloy.yml
+
+- name: Install Grafana Alloy Kubernetes event collector
+  ansible.builtin.import_playbook: alloy-events.yml
