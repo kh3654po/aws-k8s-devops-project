@@ -1,0 +1,79 @@
+---
+- name: Deploy Kubernetes logging test application
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  tasks:
+    - name: Check Kubernetes administrator kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: logging_test_kubeconfig
+
+    - name: Fail when Kubernetes control plane is not initialized
+      ansible.builtin.assert:
+        that:
+          - logging_test_kubeconfig.stat.exists
+        fail_msg: >-
+          Kubernetes administrator kubeconfig was not found at
+          {{ kubeconfig_path }}.
+        success_msg: Kubernetes administrator kubeconfig was found.
+
+    - name: Copy logging test file
+      ansible.builtin.copy:
+        src: files/logging-test.yml
+        dest: /tmp/logging-test.yml
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Apply logging test file
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - -f
+          - /tmp/logging-test.yml
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: logging_test_apply
+
+    - name: Show logging test apply result
+      ansible.builtin.debug:
+        msg: "{{ logging_test_apply.stdout_lines }}"
+
+    - name: Wait for logging test deployment rollout
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment/log-generator
+          - --namespace
+          - logging-test
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Get logging test pods
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pods
+          - --namespace
+          - logging-test
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: logging_test_pods
+      changed_when: false
+
+    - name: Show logging test pods
+      ansible.builtin.debug:
+        msg: "{{ logging_test_pods.stdout_lines }}"
