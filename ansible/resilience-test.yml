@@ -1,0 +1,163 @@
+---
+- name: Deploy Kubernetes resilience test workloads
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  tasks:
+    - name: Check Kubernetes administrator kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: resilience_test_kubeconfig
+
+    - name: Fail when Kubernetes control plane is not initialized
+      ansible.builtin.assert:
+        that:
+          - resilience_test_kubeconfig.stat.exists
+        fail_msg: >-
+          Kubernetes administrator kubeconfig was not found at
+          {{ kubeconfig_path }}.
+        success_msg: Kubernetes administrator kubeconfig was found.
+
+    - name: Copy resilience test file
+      ansible.builtin.copy:
+        src: files/resilience-test.yml
+        dest: /tmp/resilience-test.yml
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Apply resilience test file
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - -f
+          - /tmp/resilience-test.yml
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: resilience_test_apply
+
+    - name: Show resilience test apply result
+      ansible.builtin.debug:
+        msg: "{{ resilience_test_apply.stdout_lines }}"
+
+    - name: Wait for resilience application rollout
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment/resilience-app
+          - --namespace
+          - resilience-test
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Get resilience application deployment
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - deployment
+          - resilience-app
+          - --namespace
+          - resilience-test
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: resilience_test_deployment
+      changed_when: false
+
+    - name: Get resilience application replica sets
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - replicaset
+          - --namespace
+          - resilience-test
+          - -l
+          - app=resilience-app
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: resilience_test_replicasets
+      changed_when: false
+
+    - name: Get resilience application pods
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pods
+          - --namespace
+          - resilience-test
+          - -l
+          - app=resilience-app
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: resilience_test_pods
+      changed_when: false
+
+    - name: Get resilience application service
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - service
+          - resilience-app
+          - --namespace
+          - resilience-test
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: resilience_test_service
+      changed_when: false
+
+    - name: Get resilience application endpoint slices
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - endpointslice
+          - --namespace
+          - resilience-test
+          - -l
+          - kubernetes.io/service-name=resilience-app
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: resilience_test_endpoints
+      changed_when: false
+
+    - name: Show resilience application deployment
+      ansible.builtin.debug:
+        msg: "{{ resilience_test_deployment.stdout_lines }}"
+
+    - name: Show resilience application replica sets
+      ansible.builtin.debug:
+        msg: "{{ resilience_test_replicasets.stdout_lines }}"
+
+    - name: Show resilience application pods
+      ansible.builtin.debug:
+        msg: "{{ resilience_test_pods.stdout_lines }}"
+
+    - name: Show resilience application service
+      ansible.builtin.debug:
+        msg: "{{ resilience_test_service.stdout_lines }}"
+
+    - name: Show resilience application endpoint slices
+      ansible.builtin.debug:
+        msg: "{{ resilience_test_endpoints.stdout_lines }}"

@@ -1,0 +1,53 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: resilience-test
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: resilience-app
+  namespace: resilience-test
+  labels:
+    app: resilience-app
+
+spec:
+  replicas: 3
+
+  selector:
+    matchLabels:
+      app: resilience-app
+
+  template:
+    metadata:
+      labels:
+        app: resilience-app
+
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.27-alpine
+
+          ports:
+            - name: http
+              containerPort: 80
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: resilience-app
+  namespace: resilience-test
+
+spec:
+  type: ClusterIP
+
+  selector:
+    app: resilience-app
+
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
