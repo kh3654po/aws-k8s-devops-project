@@ -30,9 +30,54 @@ spec:
         - name: nginx
           image: nginx:1.27-alpine
 
+          command:
+            - /bin/sh
+            - -c
+
+          args:
+            - |
+              echo "Application startup begins"
+
+              sleep 20
+
+              echo "startup-ok" > /usr/share/nginx/html/startup
+              echo "ready-ok" > /usr/share/nginx/html/ready
+              echo "healthy-ok" > /usr/share/nginx/html/healthz
+
+              echo "Application startup complete"
+
+              exec nginx -g 'daemon off;'
+
           ports:
             - name: http
               containerPort: 80
+
+          startupProbe:
+            httpGet:
+              path: /startup
+              port: http
+
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 10
+
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2
+
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
 
 ---
 apiVersion: v1
