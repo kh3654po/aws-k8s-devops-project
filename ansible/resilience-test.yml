@@ -142,6 +142,61 @@
       register: resilience_test_endpoints
       changed_when: false
 
+    - name: Copy resilience PDB file
+      ansible.builtin.copy:
+        src: files/resilience-pdb.yml
+        dest: /tmp/resilience-pdb.yml
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Validate resilience PDB file
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - --dry-run=client
+          - -f
+          - /tmp/resilience-pdb.yml
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Apply resilience PDB file
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - -f
+          - /tmp/resilience-pdb.yml
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: resilience_pdb_apply
+
+    - name: Show resilience PDB apply result
+      ansible.builtin.debug:
+        msg: "{{ resilience_pdb_apply.stdout_lines }}"
+
+    - name: Get resilience PDB
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - poddisruptionbudget
+          - resilience-app
+          - --namespace
+          - resilience-test
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: resilience_pdb_status
+      changed_when: false
+
+    - name: Show resilience PDB
+      ansible.builtin.debug:
+        msg: "{{ resilience_pdb_status.stdout_lines }}"
+
     - name: Show resilience application deployment
       ansible.builtin.debug:
         msg: "{{ resilience_test_deployment.stdout_lines }}"
