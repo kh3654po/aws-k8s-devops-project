@@ -42,6 +42,7 @@ resource "aws_iam_policy" "cluster_autoscaler" {
           "autoscaling:DescribeLaunchConfigurations",
           "autoscaling:DescribeScalingActivities",
           "ec2:DescribeImages",
+          "ec2:DescribeInstances",
           "ec2:DescribeInstanceTypes",
           "ec2:DescribeLaunchTemplateVersions",
           "ec2:GetInstanceTypesFromInstanceRequirements"
