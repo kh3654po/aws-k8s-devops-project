@@ -1,0 +1,662 @@
+---
+- name: Safely validate Kubernetes resilience maintenance
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  vars:
+    resilience_namespace: resilience-test
+    resilience_deployment: resilience-app
+    resilience_service: resilience-app
+    resilience_app_selector: app=resilience-app
+    resilience_pdb: resilience-app
+
+    expected_replicas: 3
+
+    maintenance_confirm: false
+    maintenance_node: ""
+
+    drain_timeout: 300
+    recovery_retries: 60
+    recovery_delay: 10
+
+  tasks:
+    - name: Require explicit maintenance confirmation
+      ansible.builtin.assert:
+        that:
+          - maintenance_confirm | bool
+        fail_msg: >-
+          Maintenance was not confirmed.
+          Run with -e maintenance_confirm=true.
+        success_msg: Maintenance confirmation received.
+
+    - name: Check Kubernetes administrator kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: maintenance_kubeconfig
+
+    - name: Verify Kubernetes administrator kubeconfig
+      ansible.builtin.assert:
+        that:
+          - maintenance_kubeconfig.stat.exists
+        fail_msg: >-
+          Kubernetes administrator kubeconfig does not exist:
+          {{ kubeconfig_path }}
+
+    - name: Read resilience Deployment
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - deployment
+          - "{{ resilience_deployment }}"
+          - -n
+          - "{{ resilience_namespace }}"
+          - -o
+          - json
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: maintenance_deployment_raw
+      changed_when: false
+
+    - name: Parse resilience Deployment
+      ansible.builtin.set_fact:
+        maintenance_deployment: >-
+          {{
+            maintenance_deployment_raw.stdout
+            | from_json
+          }}
+
+    - name: Verify Deployment is healthy
+      ansible.builtin.assert:
+        that:
+          - >-
+            maintenance_deployment.spec.replicas
+            | int
+            ==
+            expected_replicas
+          - >-
+            maintenance_deployment.status.readyReplicas
+            | default(0)
+            | int
+            ==
+            expected_replicas
+          - >-
+            maintenance_deployment.status.availableReplicas
+            | default(0)
+            | int
+            ==
+            expected_replicas
+        fail_msg: >-
+          Deployment is not healthy enough to start maintenance.
+        success_msg: >-
+          Deployment is healthy and ready for maintenance.
+
+    - name: Read PodDisruptionBudget
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pdb
+          - "{{ resilience_pdb }}"
+          - -n
+          - "{{ resilience_namespace }}"
+          - -o
+          - json
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: maintenance_pdb_raw
+      changed_when: false
+
+    - name: Parse PodDisruptionBudget
+      ansible.builtin.set_fact:
+        maintenance_pdb: >-
+          {{
+            maintenance_pdb_raw.stdout
+            | from_json
+          }}
+
+    - name: Verify PDB permits disruption
+      ansible.builtin.assert:
+        that:
+          - >-
+            maintenance_pdb.status.disruptionsAllowed
+            | default(0)
+            | int
+            >=
+            1
+        fail_msg: >-
+          PDB currently does not permit a disruption.
+        success_msg: >-
+          PDB permits at least one disruption.
+
+    - name: Read application Pods
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pods
+          - -n
+          - "{{ resilience_namespace }}"
+          - -l
+          - "{{ resilience_app_selector }}"
+          - -o
+          - json
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: maintenance_pods_raw
+      changed_when: false
+
+    - name: Parse application Pods
+      ansible.builtin.set_fact:
+        maintenance_pods: >-
+          {{
+            maintenance_pods_raw.stdout
+            | from_json
+          }}
+
+    - name: Build application node list
+      ansible.builtin.set_fact:
+        maintenance_app_nodes: >-
+          {{
+            maintenance_pods['items']
+            | map(attribute='spec.nodeName')
+            | select('defined')
+            | reject('equalto', '')
+            | unique
+            | list
+          }}
+
+    - name: Verify application node list exists
+      ansible.builtin.assert:
+        that:
+          - maintenance_app_nodes | length > 0
+        fail_msg: >-
+          No scheduled resilience-app Pods were found.
+        success_msg: >-
+          Application nodes:
+          {{ maintenance_app_nodes | join(', ') }}
+
+    - name: Read Kubernetes nodes
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - nodes
+          - -o
+          - json
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: maintenance_nodes_raw
+      changed_when: false
+
+    - name: Parse Kubernetes nodes
+      ansible.builtin.set_fact:
+        maintenance_nodes: >-
+          {{
+            maintenance_nodes_raw.stdout
+            | from_json
+          }}
+
+    - name: Initialize maintenance node map
+      ansible.builtin.set_fact:
+        maintenance_node_map: {}
+
+    - name: Build maintenance node map
+      ansible.builtin.set_fact:
+        maintenance_node_map: >-
+          {{
+            maintenance_node_map
+            | combine({
+                item.metadata.name: item
+              })
+          }}
+      loop: "{{ maintenance_nodes['items'] }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+
+    - name: Initialize safe maintenance candidates
+      ansible.builtin.set_fact:
+        maintenance_candidates: []
+
+    - name: Build safe maintenance candidate list
+      ansible.builtin.set_fact:
+        maintenance_candidates: >-
+          {{
+            maintenance_candidates
+            +
+            [item]
+          }}
+      loop: "{{ maintenance_app_nodes }}"
+      when:
+        - item in maintenance_node_map
+        - >-
+          maintenance_node_map[item].metadata.labels[
+            'node-role.kubernetes.io/control-plane'
+          ]
+          is not defined
+        - >-
+          maintenance_node_map[item].metadata.labels[
+            'node-role.kubernetes.io/master'
+          ]
+          is not defined
+        - >-
+          not (
+            maintenance_node_map[item].spec.unschedulable
+            | default(false)
+          )
+        - >-
+          (
+            maintenance_node_map[item].status.conditions
+            | selectattr('type', 'equalto', 'Ready')
+            | map(attribute='status')
+            | first
+            | default('Unknown')
+          )
+          ==
+          'True'
+
+    - name: Verify safe maintenance candidate exists
+      ansible.builtin.assert:
+        that:
+          - maintenance_candidates | length > 0
+        fail_msg: >-
+          No Ready and schedulable worker node running
+          resilience-app is available for maintenance.
+        success_msg: >-
+          Safe maintenance candidates:
+          {{ maintenance_candidates | join(', ') }}
+
+    - name: Select maintenance target
+      ansible.builtin.set_fact:
+        selected_maintenance_node: >-
+          {{
+            maintenance_node
+            if maintenance_node | length > 0
+            else maintenance_candidates[0]
+          }}
+
+    - name: Verify explicitly selected maintenance node is safe
+      ansible.builtin.assert:
+        that:
+          - selected_maintenance_node in maintenance_candidates
+        fail_msg: >-
+          Selected node {{ selected_maintenance_node }}
+          is not a Ready and schedulable worker running
+          resilience-app.
+        success_msg: >-
+          Selected maintenance node:
+          {{ selected_maintenance_node }}
+
+    - name: Show selected maintenance node
+      ansible.builtin.debug:
+        msg:
+          - "Safe candidates: {{ maintenance_candidates | join(', ') }}"
+          - "Selected node: {{ selected_maintenance_node }}"
+
+    - name: Read Service ClusterIP
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - service
+          - "{{ resilience_service }}"
+          - -n
+          - "{{ resilience_namespace }}"
+          - -o
+          - jsonpath={.spec.clusterIP}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: maintenance_service_ip_raw
+      changed_when: false
+
+    - name: Store Service ClusterIP
+      ansible.builtin.set_fact:
+        maintenance_service_ip: >-
+          {{
+            maintenance_service_ip_raw.stdout
+            | trim
+          }}
+
+    - name: Verify Service before maintenance
+      ansible.builtin.uri:
+        url: "http://{{ maintenance_service_ip }}/version"
+        method: GET
+        return_content: true
+        status_code: 200
+        timeout: 3
+      register: maintenance_service_before
+
+    - name: Execute guarded maintenance
+      block:
+        - name: Drain selected Worker
+          ansible.builtin.command:
+            argv:
+              - kubectl
+              - drain
+              - "{{ selected_maintenance_node }}"
+              - --ignore-daemonsets
+              - "--pod-selector={{ resilience_app_selector }}"
+              - "--timeout={{ drain_timeout }}s"
+          environment:
+            KUBECONFIG: "{{ kubeconfig_path }}"
+          register: maintenance_drain
+          changed_when: true
+
+        - name: Display drain result
+          ansible.builtin.debug:
+            var: maintenance_drain.stdout_lines
+
+        - name: Wait for Deployment recovery
+          ansible.builtin.command:
+            argv:
+              - kubectl
+              - get
+              - deployment
+              - "{{ resilience_deployment }}"
+              - -n
+              - "{{ resilience_namespace }}"
+              - -o
+              - jsonpath={.status.availableReplicas}
+          environment:
+            KUBECONFIG: "{{ kubeconfig_path }}"
+          register: maintenance_available
+          changed_when: false
+          retries: "{{ recovery_retries }}"
+          delay: "{{ recovery_delay }}"
+          until:
+            - >-
+              maintenance_available.stdout
+              | default('0')
+              | int
+              ==
+              expected_replicas
+
+        - name: Read recovered application Pods
+          ansible.builtin.command:
+            argv:
+              - kubectl
+              - get
+              - pods
+              - -n
+              - "{{ resilience_namespace }}"
+              - -l
+              - "{{ resilience_app_selector }}"
+              - -o
+              - wide
+          environment:
+            KUBECONFIG: "{{ kubeconfig_path }}"
+          register: maintenance_recovered_pods
+          changed_when: false
+
+        - name: Display recovered application Pods
+          ansible.builtin.debug:
+            var: maintenance_recovered_pods.stdout_lines
+
+        - name: Verify Service after recovery
+          ansible.builtin.uri:
+            url: "http://{{ maintenance_service_ip }}/version"
+            method: GET
+            return_content: true
+            status_code: 200
+            timeout: 3
+          register: maintenance_service_after
+          retries: 12
+          delay: 5
+          until:
+            - maintenance_service_after.status == 200
+
+      rescue:
+        - name: Read nodes after failure
+          ansible.builtin.command:
+            argv:
+              - kubectl
+              - get
+              - nodes
+              - -o
+              - wide
+          environment:
+            KUBECONFIG: "{{ kubeconfig_path }}"
+          register: maintenance_diag_nodes
+          changed_when: false
+          failed_when: false
+
+        - name: Read application Pods after failure
+          ansible.builtin.command:
+            argv:
+              - kubectl
+              - get
+              - pods
+              - -n
+              - "{{ resilience_namespace }}"
+              - -l
+              - "{{ resilience_app_selector }}"
+              - -o
+              - wide
+          environment:
+            KUBECONFIG: "{{ kubeconfig_path }}"
+          register: maintenance_diag_pods
+          changed_when: false
+          failed_when: false
+
+        - name: Read PDB after failure
+          ansible.builtin.command:
+            argv:
+              - kubectl
+              - get
+              - pdb
+              - "{{ resilience_pdb }}"
+              - -n
+              - "{{ resilience_namespace }}"
+          environment:
+            KUBECONFIG: "{{ kubeconfig_path }}"
+          register: maintenance_diag_pdb
+          changed_when: false
+          failed_when: false
+
+        - name: Read EndpointSlices after failure
+          ansible.builtin.command:
+            argv:
+              - kubectl
+              - get
+              - endpointslices
+              - -n
+              - "{{ resilience_namespace }}"
+              - -l
+              - "kubernetes.io/service-name={{ resilience_service }}"
+              - -o
+              - wide
+          environment:
+            KUBECONFIG: "{{ kubeconfig_path }}"
+          register: maintenance_diag_endpoints
+          changed_when: false
+          failed_when: false
+
+        - name: Read recent events after failure
+          ansible.builtin.command:
+            argv:
+              - kubectl
+              - get
+              - events
+              - -n
+              - "{{ resilience_namespace }}"
+              - --sort-by=.lastTimestamp
+          environment:
+            KUBECONFIG: "{{ kubeconfig_path }}"
+          register: maintenance_diag_events
+          changed_when: false
+          failed_when: false
+
+        - name: Read Cluster Autoscaler logs after failure
+          ansible.builtin.shell: >-
+            kubectl
+            --kubeconfig={{ kubeconfig_path }}
+            logs
+            -n kube-system
+            deployment/cluster-autoscaler
+            --since=20m
+            |
+            grep -Ei
+            'TriggeredScaleUp|FailedScheduling|providerId|unregistered|scale.?down|unneeded|remov'
+          register: maintenance_diag_autoscaler
+          changed_when: false
+          failed_when: false
+
+        - name: Display diagnostics
+          ansible.builtin.debug:
+            msg:
+              - "Nodes:"
+              - "{{ maintenance_diag_nodes.stdout_lines | default([]) }}"
+              - "Pods:"
+              - "{{ maintenance_diag_pods.stdout_lines | default([]) }}"
+              - "PDB:"
+              - "{{ maintenance_diag_pdb.stdout_lines | default([]) }}"
+              - "EndpointSlices:"
+              - "{{ maintenance_diag_endpoints.stdout_lines | default([]) }}"
+              - "Events:"
+              - "{{ maintenance_diag_events.stdout_lines | default([]) }}"
+              - "Cluster Autoscaler:"
+              - "{{ maintenance_diag_autoscaler.stdout_lines | default([]) }}"
+
+        - name: Mark maintenance as failed
+          ansible.builtin.set_fact:
+            maintenance_failed: true
+
+      always:
+        - name: Read selected node before uncordon
+          ansible.builtin.command:
+            argv:
+              - kubectl
+              - get
+              - node
+              - "{{ selected_maintenance_node }}"
+              - -o
+              - name
+          environment:
+            KUBECONFIG: "{{ kubeconfig_path }}"
+          register: maintenance_target_exists
+          changed_when: false
+          failed_when: false
+
+        - name: Uncordon selected Worker
+          ansible.builtin.command:
+            argv:
+              - kubectl
+              - uncordon
+              - "{{ selected_maintenance_node }}"
+          environment:
+            KUBECONFIG: "{{ kubeconfig_path }}"
+          register: maintenance_uncordon
+          changed_when: >-
+            maintenance_uncordon.rc == 0
+          failed_when: false
+          when:
+            - maintenance_target_exists.rc == 0
+
+        - name: Display uncordon result
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                maintenance_uncordon.stdout
+                | default(
+                    'Target node no longer exists. Uncordon skipped.'
+                  )
+              }}
+
+    - name: Fail after diagnostics when maintenance failed
+      ansible.builtin.fail:
+        msg: >-
+          Kubernetes maintenance failed.
+          Diagnostics were collected and the Worker was uncordoned
+          when the Node object still existed.
+      when:
+        - maintenance_failed | default(false) | bool
+
+    - name: Read final Deployment state
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - deployment
+          - "{{ resilience_deployment }}"
+          - -n
+          - "{{ resilience_namespace }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: maintenance_final_deployment
+      changed_when: false
+
+    - name: Read final Pod distribution
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pods
+          - -n
+          - "{{ resilience_namespace }}"
+          - -l
+          - "{{ resilience_app_selector }}"
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: maintenance_final_pods
+      changed_when: false
+
+    - name: Read final PDB state
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pdb
+          - "{{ resilience_pdb }}"
+          - -n
+          - "{{ resilience_namespace }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: maintenance_final_pdb
+      changed_when: false
+
+    - name: Read final Kubernetes node state
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - nodes
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: maintenance_final_nodes
+      changed_when: false
+
+    - name: Read final provider IDs
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - nodes
+          - -o
+          - >-
+            custom-columns=NAME:.metadata.name,STATUS:.status.conditions[-1].type,PROVIDER_ID:.spec.providerID
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: maintenance_final_provider_ids
+      changed_when: false
+
+    - name: Display final state
+      ansible.builtin.debug:
+        msg:
+          - "Deployment:"
+          - "{{ maintenance_final_deployment.stdout_lines }}"
+          - "Pods:"
+          - "{{ maintenance_final_pods.stdout_lines }}"
+          - "PDB:"
+          - "{{ maintenance_final_pdb.stdout_lines }}"
+          - "Nodes:"
+          - "{{ maintenance_final_nodes.stdout_lines }}"
+          - "Provider IDs:"
+          - "{{ maintenance_final_provider_ids.stdout_lines }}"
