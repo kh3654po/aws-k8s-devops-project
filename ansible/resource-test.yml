@@ -1,0 +1,103 @@
+---
+- name: Validate Kubernetes resource limits and failure behavior
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  tasks:
+    - name: Check Kubernetes admin kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: kubeconfig_stat
+
+    - name: Assert Kubernetes admin kubeconfig exists
+      ansible.builtin.assert:
+        that:
+          - kubeconfig_stat.stat.exists
+        fail_msg: "Kubernetes admin kubeconfig was not found."
+
+    - name: Copy resource test manifest
+      ansible.builtin.copy:
+        src: files/resource-test.yml
+        dest: /tmp/resource-test.yml
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Validate resource test manifest
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - --dry-run=client
+          - -f
+          - /tmp/resource-test.yml
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Delete existing resource test pods
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - delete
+          - pod
+          - oom-test
+          - cpu-throttle-test
+          - unschedulable-test
+          - --namespace
+          - resilience-test
+          - --ignore-not-found
+          - --wait=true
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: true
+
+    - name: Apply resource test manifest
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - -f
+          - /tmp/resource-test.yml
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: resource_test_apply
+
+    - name: Wait for OOM test termination
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - wait
+          - --for=jsonpath={.status.phase}=Failed
+          - pod/oom-test
+          - --namespace
+          - resilience-test
+          - --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: oom_wait
+      changed_when: false
+      failed_when: false
+
+    - name: Get resource test pods
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pods
+          - --namespace
+          - resilience-test
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: resource_test_pods
+      changed_when: false
+
+    - name: Show resource test pods
+      ansible.builtin.debug:
+        msg: "{{ resource_test_pods.stdout_lines }}"
