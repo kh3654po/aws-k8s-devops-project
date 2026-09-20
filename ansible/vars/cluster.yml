@@ -426,3 +426,22 @@ aws_ccm_namespace: kube-system
 aws_ccm_image_tag: "v1.36.1"
 
 aws_ccm_values_remote_path: /tmp/aws-cloud-controller-manager-values.yml
+
+# Istio Service Mesh
+istio_version: "1.31.0"
+
+istio_namespace: istio-system
+
+# Istio Helm Repository
+istio_repository_name: istio
+istio_repository_url: https://blob.istio.io/istio-release/charts
+
+# Istio Base
+istio_base_chart: istio/base
+istio_base_release_name: istio-base
+istio_base_values_remote_path: /tmp/istio-base-values.yml
+
+# Istiod
+istiod_chart: istio/istiod
+istiod_release_name: istiod
+istiod_values_remote_path: /tmp/istiod-values.yml

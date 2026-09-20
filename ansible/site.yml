@@ -38,6 +38,9 @@
 - name: Install AWS EBS CSI Driver
   ansible.builtin.import_playbook: ebs-csi-driver.yml
 
+- name: Install Istio service mesh control plane
+  ansible.builtin.import_playbook: istio.yml
+
 - name: Install Kubernetes monitoring stack
   ansible.builtin.import_playbook: monitoring.yml
 

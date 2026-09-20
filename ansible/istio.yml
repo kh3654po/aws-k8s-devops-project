@@ -1,0 +1,341 @@
+---
+- name: Install Istio service mesh control plane
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  tasks:
+    - name: Check Kubernetes administrator kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: istio_kubeconfig
+
+    - name: Verify Kubernetes administrator kubeconfig
+      ansible.builtin.assert:
+        that:
+          - istio_kubeconfig.stat.exists
+        fail_msg: >-
+          Kubernetes administrator kubeconfig was not found at
+          {{ kubeconfig_path }}.
+        success_msg: >-
+          Kubernetes administrator kubeconfig was found.
+
+    - name: Check Helm binary
+      ansible.builtin.stat:
+        path: "{{ helm_binary_path }}"
+      register: istio_helm
+
+    - name: Verify Helm binary
+      ansible.builtin.assert:
+        that:
+          - istio_helm.stat.exists
+          - istio_helm.stat.executable
+        fail_msg: >-
+          Helm binary was not found or is not executable at
+          {{ helm_binary_path }}.
+        success_msg: >-
+          Helm binary was found.
+
+    - name: Ensure Istio namespace exists
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        kubectl create namespace {{ istio_namespace }} \
+          --dry-run=client \
+          --output=yaml |
+        kubectl apply --filename=-
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_namespace_result
+      changed_when: >-
+        'created' in istio_namespace_result.stdout or
+        'configured' in istio_namespace_result.stdout
+
+    - name: Add Istio Helm repository
+      kubernetes.core.helm_repository:
+        name: "{{ istio_repository_name }}"
+        repo_url: "{{ istio_repository_url }}"
+        binary_path: "{{ helm_binary_path }}"
+        repo_state: present
+        force_update: true
+
+    - name: Update Helm repositories
+      ansible.builtin.command:
+        argv:
+          - "{{ helm_binary_path }}"
+          - repo
+          - update
+      changed_when: false
+
+    - name: Verify Istio Base chart version
+      ansible.builtin.command:
+        argv:
+          - "{{ helm_binary_path }}"
+          - search
+          - repo
+          - "{{ istio_base_chart }}"
+          - --version
+          - "{{ istio_version }}"
+      register: istio_base_chart_search
+      changed_when: false
+      failed_when: >-
+        istio_base_chart_search.rc != 0 or
+        istio_version not in istio_base_chart_search.stdout
+
+    - name: Verify Istiod chart version
+      ansible.builtin.command:
+        argv:
+          - "{{ helm_binary_path }}"
+          - search
+          - repo
+          - "{{ istiod_chart }}"
+          - --version
+          - "{{ istio_version }}"
+      register: istiod_chart_search
+      changed_when: false
+      failed_when: >-
+        istiod_chart_search.rc != 0 or
+        istio_version not in istiod_chart_search.stdout
+
+    - name: Render Istio Base values
+      ansible.builtin.template:
+        src: istio-base-values.yml.j2
+        dest: "{{ istio_base_values_remote_path }}"
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Render Istiod values
+      ansible.builtin.template:
+        src: istiod-values.yml.j2
+        dest: "{{ istiod_values_remote_path }}"
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Validate Istio Base Helm template
+      ansible.builtin.command:
+        argv:
+          - "{{ helm_binary_path }}"
+          - template
+          - "{{ istio_base_release_name }}"
+          - "{{ istio_base_chart }}"
+          - --namespace
+          - "{{ istio_namespace }}"
+          - --version
+          - "{{ istio_version }}"
+          - --values
+          - "{{ istio_base_values_remote_path }}"
+      changed_when: false
+
+    - name: Validate Istiod Helm template
+      ansible.builtin.command:
+        argv:
+          - "{{ helm_binary_path }}"
+          - template
+          - "{{ istiod_release_name }}"
+          - "{{ istiod_chart }}"
+          - --namespace
+          - "{{ istio_namespace }}"
+          - --version
+          - "{{ istio_version }}"
+          - --values
+          - "{{ istiod_values_remote_path }}"
+      changed_when: false
+
+    - name: Install or upgrade Istio Base
+      kubernetes.core.helm:
+        name: "{{ istio_base_release_name }}"
+        chart_ref: "{{ istio_base_chart }}"
+        chart_version: "{{ istio_version }}"
+
+        release_namespace: "{{ istio_namespace }}"
+        create_namespace: false
+        release_state: present
+
+        values_files:
+          - "{{ istio_base_values_remote_path }}"
+
+        kubeconfig: "{{ kubeconfig_path }}"
+        binary_path: "{{ helm_binary_path }}"
+
+        update_repo_cache: true
+        reset_values: true
+
+        wait: true
+        timeout: 5m0s
+        history_max: 10
+
+    - name: Wait for Istio VirtualService CRD
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - wait
+          - --for=condition=Established
+          - crd/virtualservices.networking.istio.io
+          - --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Wait for Istio DestinationRule CRD
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - wait
+          - --for=condition=Established
+          - crd/destinationrules.networking.istio.io
+          - --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Wait for Istio PeerAuthentication CRD
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - wait
+          - --for=condition=Established
+          - crd/peerauthentications.security.istio.io
+          - --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Wait for Istio AuthorizationPolicy CRD
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - wait
+          - --for=condition=Established
+          - crd/authorizationpolicies.security.istio.io
+          - --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Install or upgrade Istiod
+      kubernetes.core.helm:
+        name: "{{ istiod_release_name }}"
+        chart_ref: "{{ istiod_chart }}"
+        chart_version: "{{ istio_version }}"
+
+        release_namespace: "{{ istio_namespace }}"
+        create_namespace: false
+        release_state: present
+
+        values_files:
+          - "{{ istiod_values_remote_path }}"
+
+        kubeconfig: "{{ kubeconfig_path }}"
+        binary_path: "{{ helm_binary_path }}"
+
+        update_repo_cache: true
+        reset_values: true
+
+        wait: true
+        timeout: 10m0s
+        history_max: 10
+
+    - name: Wait for Istiod deployment rollout
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment/istiod
+          - --namespace
+          - "{{ istio_namespace }}"
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Get Istio pods
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pods
+          - --namespace
+          - "{{ istio_namespace }}"
+          - --output=wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_pods
+      changed_when: false
+
+    - name: Get Istio services
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - services
+          - --namespace
+          - "{{ istio_namespace }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_services
+      changed_when: false
+
+    - name: Get Istio Helm releases
+      ansible.builtin.command:
+        argv:
+          - "{{ helm_binary_path }}"
+          - list
+          - --namespace
+          - "{{ istio_namespace }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_helm_releases
+      changed_when: false
+
+    - name: Get Istio sidecar injector webhook
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - mutatingwebhookconfiguration
+          - istio-sidecar-injector
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_sidecar_injector
+      changed_when: false
+
+    - name: Get Istio validating webhook
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - validatingwebhookconfiguration
+          - istio-validator-istio-system
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_validator
+      changed_when: false
+
+    - name: Show Istio pods
+      ansible.builtin.debug:
+        msg: "{{ istio_pods.stdout_lines }}"
+
+    - name: Show Istio services
+      ansible.builtin.debug:
+        msg: "{{ istio_services.stdout_lines }}"
+
+    - name: Show Istio Helm releases
+      ansible.builtin.debug:
+        msg: "{{ istio_helm_releases.stdout_lines }}"
+
+    - name: Show Istio control plane result
+      ansible.builtin.debug:
+        msg:
+          - "Istio version: {{ istio_version }}"
+          - "Istio namespace: {{ istio_namespace }}"
+          - "Istio Base release: {{ istio_base_release_name }}"
+          - "Istiod release: {{ istiod_release_name }}"
+          - "Istio control plane installation completed successfully."
