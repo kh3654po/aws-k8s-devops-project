@@ -445,3 +445,13 @@ istio_base_values_remote_path: /tmp/istio-base-values.yml
 istiod_chart: istio/istiod
 istiod_release_name: istiod
 istiod_values_remote_path: /tmp/istiod-values.yml
+
+# Istio Sidecar Test
+istio_test_namespace: istio-test
+
+istio_sidecar_test_manifest_local_path: files/istio-sidecar-test.yml
+istio_sidecar_test_manifest_remote_path: /tmp/istio-sidecar-test.yml
+
+istio_test_client_app: istio-client
+istio_test_server_app: istio-nginx
+istio_test_server_service: istio-nginx

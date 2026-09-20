@@ -1,0 +1,406 @@
+---
+- name: Configure and verify Istio sidecar data plane
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  tasks:
+    - name: Check Kubernetes administrator kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: istio_sidecar_kubeconfig
+
+    - name: Verify Kubernetes administrator kubeconfig
+      ansible.builtin.assert:
+        that:
+          - istio_sidecar_kubeconfig.stat.exists
+        fail_msg: >-
+          Kubernetes administrator kubeconfig was not found at
+          {{ kubeconfig_path }}.
+        success_msg: >-
+          Kubernetes administrator kubeconfig was found.
+
+    - name: Verify Istiod is available
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - wait
+          - --for=condition=Available
+          - deployment/istiod
+          - --namespace
+          - "{{ istio_namespace }}"
+          - --timeout=180s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Ensure Istio test namespace exists
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        kubectl create namespace {{ istio_test_namespace }} \
+          --dry-run=client \
+          --output=yaml |
+        kubectl apply --filename=-
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_test_namespace_result
+      changed_when: >-
+        'created' in istio_test_namespace_result.stdout or
+        'configured' in istio_test_namespace_result.stdout
+
+    - name: Get current Istio injection namespace label
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - namespace
+          - "{{ istio_test_namespace }}"
+          - --output=jsonpath={.metadata.labels.istio-injection}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_test_injection_label
+      changed_when: false
+      failed_when: false
+
+    - name: Enable automatic Istio sidecar injection
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - label
+          - namespace
+          - "{{ istio_test_namespace }}"
+          - istio-injection=enabled
+          - --overwrite
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      when: istio_test_injection_label.stdout | trim != 'enabled'
+
+    - name: Verify Istio injection namespace label
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - namespace
+          - "{{ istio_test_namespace }}"
+          - --show-labels
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_test_namespace_labels
+      changed_when: false
+
+    - name: Copy Istio sidecar test manifest
+      ansible.builtin.copy:
+        src: "{{ istio_sidecar_test_manifest_local_path }}"
+        dest: "{{ istio_sidecar_test_manifest_remote_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Apply Istio sidecar test resources
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --filename
+          - "{{ istio_sidecar_test_manifest_remote_path }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_sidecar_test_apply
+      changed_when: >-
+        'created' in istio_sidecar_test_apply.stdout or
+        'configured' in istio_sidecar_test_apply.stdout
+
+    - name: Wait for Istio nginx deployment rollout
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment/{{ istio_test_server_app }}
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Wait for Istio client deployment rollout
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment/{{ istio_test_client_app }}
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Wait for Istio test pods to become Ready
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - wait
+          - --for=condition=Ready
+          - pod
+          - --selector=mesh-test=true
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Verify every test pod contains istio-proxy
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        PODS="$(
+          kubectl get pods \
+            --namespace {{ istio_test_namespace }} \
+            --selector mesh-test=true \
+            --output=name
+        )"
+
+        if [ -z "${PODS}" ]; then
+          echo "No Istio test pods were found."
+          exit 1
+        fi
+
+        for POD in ${PODS}; do
+          CONTAINERS="$(
+            kubectl get "${POD}" \
+              --namespace {{ istio_test_namespace }} \
+              --output=jsonpath='{.spec.containers[*].name}'
+          )"
+
+          INIT_CONTAINERS="$(
+            kubectl get "${POD}" \
+              --namespace {{ istio_test_namespace }} \
+              --output=jsonpath='{.spec.initContainers[*].name}'
+          )"
+
+          echo "${POD}"
+          echo "  containers: ${CONTAINERS}"
+          echo "  initContainers: ${INIT_CONTAINERS}"
+
+          if ! printf '%s\n%s\n' \
+            "${CONTAINERS}" \
+            "${INIT_CONTAINERS}" |
+            tr ' ' '\n' |
+            grep -qx 'istio-proxy'; then
+
+            echo "${POD} does not contain istio-proxy."
+            exit 1
+          fi
+        done
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_sidecar_container_verification
+      changed_when: false
+
+    - name: Get Istio test pod init containers
+      ansible.builtin.shell: |
+        kubectl get pods \
+          --namespace {{ istio_test_namespace }} \
+          --selector mesh-test=true \
+          --output=jsonpath='{range .items[*]}{.metadata.name}{" => "}{range .spec.initContainers[*]}{.name}{" "}{end}{"\n"}{end}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_sidecar_init_containers
+      changed_when: false
+
+    - name: Get Istio sidecar injection annotations
+      ansible.builtin.shell: |
+        kubectl get pods \
+          --namespace {{ istio_test_namespace }} \
+          --selector mesh-test=true \
+          --output=jsonpath='{range .items[*]}{.metadata.name}{" => "}{.metadata.annotations.sidecar\.istio\.io/status}{"\n"}{end}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_sidecar_annotations
+      changed_when: false
+
+    - name: Send HTTP requests from Istio client to nginx
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        for REQUEST in 1 2 3 4 5; do
+          STATUS="$(
+            kubectl exec \
+              --namespace {{ istio_test_namespace }} \
+              deployment/{{ istio_test_client_app }} \
+              --container {{ istio_test_client_app }} \
+              -- \
+              curl \
+                --silent \
+                --show-error \
+                --output /dev/null \
+                --write-out '%{http_code}' \
+                --max-time 5 \
+                http://{{ istio_test_server_service }}/
+          )"
+
+          echo "request=${REQUEST} status=${STATUS}"
+
+          if [ "${STATUS}" != "200" ]; then
+            exit 1
+          fi
+        done
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_sidecar_http_test
+      changed_when: false
+
+    - name: Verify Envoy knows the nginx service cluster
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        kubectl exec \
+          --namespace {{ istio_test_namespace }} \
+          deployment/{{ istio_test_client_app }} \
+          --container {{ istio_test_client_app }} \
+          -- \
+          curl \
+            --silent \
+            --show-error \
+            --fail \
+            http://127.0.0.1:15000/clusters |
+        grep -F \
+          '{{ istio_test_server_service }}.{{ istio_test_namespace }}.svc.cluster.local'
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_envoy_cluster
+      changed_when: false
+
+    - name: Verify Envoy outbound request statistics
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        CLUSTERS="$(
+          kubectl exec \
+            --namespace {{ istio_test_namespace }} \
+            deployment/{{ istio_test_client_app }} \
+            --container {{ istio_test_client_app }} \
+            -- \
+            curl \
+              --silent \
+              --show-error \
+              --fail \
+              http://127.0.0.1:15000/clusters
+        )"
+
+        SERVICE_CLUSTER="outbound|80||{{ istio_test_server_service }}.{{ istio_test_namespace }}.svc.cluster.local"
+
+        REQUEST_TOTAL="$(
+          printf '%s\n' "${CLUSTERS}" |
+          awk -F'::' \
+            -v cluster="${SERVICE_CLUSTER}" '
+              $1 == cluster && $3 == "rq_total" {
+                total += $4
+              }
+              END {
+                print total + 0
+              }
+            '
+        )"
+
+        REQUEST_SUCCESS="$(
+          printf '%s\n' "${CLUSTERS}" |
+          awk -F'::' \
+            -v cluster="${SERVICE_CLUSTER}" '
+              $1 == cluster && $3 == "rq_success" {
+                total += $4
+              }
+              END {
+                print total + 0
+              }
+            '
+        )"
+
+        echo "cluster=${SERVICE_CLUSTER}"
+        echo "request_total=${REQUEST_TOTAL}"
+        echo "request_success=${REQUEST_SUCCESS}"
+
+        if [ "${REQUEST_TOTAL}" -lt 1 ]; then
+          echo "No outbound requests were observed by Envoy."
+          exit 1
+        fi
+
+        if [ "${REQUEST_SUCCESS}" -lt 1 ]; then
+          echo "No successful outbound requests were observed by Envoy."
+          exit 1
+        fi
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_envoy_outbound_stats
+      changed_when: false
+
+    - name: Get Istio test pods
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pods
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --output=wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_test_pods
+      changed_when: false
+
+    - name: Get Istio test services
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - services
+          - --namespace
+          - "{{ istio_test_namespace }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_test_services
+      changed_when: false
+
+    - name: Show Istio namespace labels
+      ansible.builtin.debug:
+        msg: "{{ istio_test_namespace_labels.stdout_lines }}"
+
+    - name: Show Istio sidecar containers
+      ansible.builtin.debug:
+        msg: "{{ istio_sidecar_container_verification.stdout_lines }}"
+
+    - name: Show Istio init containers
+      ansible.builtin.debug:
+        msg: "{{ istio_sidecar_init_containers.stdout_lines }}"
+
+    - name: Show HTTP test results
+      ansible.builtin.debug:
+        msg: "{{ istio_sidecar_http_test.stdout_lines }}"
+
+    - name: Show Envoy outbound statistics
+      ansible.builtin.debug:
+        msg: "{{ istio_envoy_outbound_stats.stdout_lines }}"
+
+    - name: Show Istio test pods
+      ansible.builtin.debug:
+        msg: "{{ istio_test_pods.stdout_lines }}"
