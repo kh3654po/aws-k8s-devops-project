@@ -38,12 +38,26 @@
     # Gateway
     # ==================================================
 
+    - name: Check whether Gateway API resource exists
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - api-resources
+          - --api-group=gateway.networking.k8s.io
+          - -o
+          - name
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: gateway_api_resources
+      changed_when: false
+      failed_when: false
+
     - name: Get remaining Gateway resources
       ansible.builtin.command:
         argv:
           - kubectl
           - get
-          - gateway
+          - gateways.gateway.networking.k8s.io
           - --all-namespaces
           - -o
           - json
@@ -51,11 +65,26 @@
         KUBECONFIG: "{{ kubeconfig_path }}"
       register: remaining_gateways_raw
       changed_when: false
+      when:
+        - "'gateways.gateway.networking.k8s.io' in gateway_api_resources.stdout_lines"
+
+    - name: Set empty Gateway result when Gateway API is absent
+      ansible.builtin.set_fact:
+        remaining_gateways:
+          items: []
+      when:
+        - "'gateways.gateway.networking.k8s.io' not in gateway_api_resources.stdout_lines"
+
+    - name: Parse remaining Gateway resources
+      ansible.builtin.set_fact:
+        remaining_gateways: "{{ remaining_gateways_raw.stdout | from_json }}"
+      when:
+        - remaining_gateways_raw is not skipped
 
     - name: Verify no Gateway resources remain
       ansible.builtin.assert:
         that:
-          - (remaining_gateways_raw.stdout | from_json)['items'] | length == 0
+          - remaining_gateways['items'] | length == 0
         fail_msg: >-
           Gateway resources still exist.
           Terraform destroy has been blocked.
@@ -166,7 +195,7 @@
           - " Kubernetes cloud cleanup completed"
           - "=========================================="
           - "Ingress              : {{ (remaining_ingresses_raw.stdout | from_json)['items'] | length }}"
-          - "Gateway              : {{ (remaining_gateways_raw.stdout | from_json)['items'] | length }}"
+          - "Gateway              : {{ remaining_gateways['items'] | length }}"
           - "LoadBalancer Service : {{ remaining_load_balancer_services | length }}"
           - "EBS PersistentVolume : {{ remaining_ebs_pvs | length }}"
           - ""
