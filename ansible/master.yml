@@ -13,13 +13,22 @@
         path: "{{ kubeconfig_path }}"
       register: kubeadm_admin_conf
 
+    - name: Render kubeadm initialization configuration
+      ansible.builtin.template:
+        src: kubeadm-init-config.yml.j2
+        dest: /tmp/kubeadm-init-config.yml
+        owner: root
+        group: root
+        mode: "0600"
+      when: not kubeadm_admin_conf.stat.exists
+
     - name: Initialize Kubernetes control plane with kubeadm
-      ansible.builtin.command: >
-        kubeadm init
-        --apiserver-advertise-address={{
-          ansible_facts["default_ipv4"]["address"]
-        }}
-        --pod-network-cidr={{ pod_network_cidr }}
+      ansible.builtin.command:
+        argv:
+          - kubeadm
+          - init
+          - --config
+          - /tmp/kubeadm-init-config.yml
       when: not kubeadm_admin_conf.stat.exists
       register: kubeadm_init_result
 

@@ -5,11 +5,11 @@
 - name: Initialize Kubernetes control plane
   ansible.builtin.import_playbook: master.yml
 
-- name: Publish kubeadm join command for ASG worker nodes
-  ansible.builtin.import_playbook: publish-join-command.yml
-
 - name: Install Helm on Kubernetes control plane
   ansible.builtin.import_playbook: helm.yml
+
+- name: Install AWS Cloud Controller Manager
+  ansible.builtin.import_playbook: aws-cloud-controller-manager.yml
 
 - name: Install Kubernetes cluster add-ons
   ansible.builtin.import_playbook: addons.yml
@@ -17,8 +17,8 @@
 - name: Join worker nodes to Kubernetes cluster
   ansible.builtin.import_playbook: workers.yml
 
-- name: Configure AWS provider IDs for Kubernetes nodes
-  ansible.builtin.import_playbook: configure-node-provider-id.yml
+- name: Publish kubeadm join command for ASG worker nodes
+  ansible.builtin.import_playbook: publish-join-command.yml
 
 - name: Install Kubernetes Metrics Server
   ansible.builtin.import_playbook: metrics-server.yml

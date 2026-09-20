@@ -107,7 +107,7 @@ apt-mark hold kubelet kubeadm kubectl
 systemctl enable kubelet
 
 echo
-echo "[7/10] Configuring Kubernetes AWS provider ID..."
+echo "[7/10] Configuring kubelet for AWS external cloud provider..."
 
 IMDS_TOKEN="$(curl -fsS \
   -X PUT \
@@ -119,35 +119,22 @@ if [ -z "$${IMDS_TOKEN}" ]; then
   exit 1
 fi
 
-INSTANCE_ID="$(curl -fsS \
+LOCAL_HOSTNAME="$(curl -fsS \
   -H "X-aws-ec2-metadata-token: $${IMDS_TOKEN}" \
-  http://169.254.169.254/latest/meta-data/instance-id)"
+  http://169.254.169.254/latest/meta-data/local-hostname)"
 
-AVAILABILITY_ZONE="$(curl -fsS \
-  -H "X-aws-ec2-metadata-token: $${IMDS_TOKEN}" \
-  http://169.254.169.254/latest/meta-data/placement/availability-zone)"
-
-if [ -z "$${INSTANCE_ID}" ]; then
-  echo "Failed to retrieve EC2 instance ID from IMDS."
+if [ -z "$${LOCAL_HOSTNAME}" ]; then
+  echo "Failed to retrieve EC2 local hostname."
   exit 1
 fi
 
-if [ -z "$${AVAILABILITY_ZONE}" ]; then
-  echo "Failed to retrieve EC2 availability zone from IMDS."
-  exit 1
-fi
-
-AWS_PROVIDER_ID="aws:///$${AVAILABILITY_ZONE}/$${INSTANCE_ID}"
-
-echo "Instance ID : $${INSTANCE_ID}"
-echo "AZ          : $${AVAILABILITY_ZONE}"
-echo "Provider ID : $${AWS_PROVIDER_ID}"
+echo "EC2 local hostname: $${LOCAL_HOSTNAME}"
 
 cat >/etc/default/kubelet <<EOF
-KUBELET_EXTRA_ARGS=--provider-id=$${AWS_PROVIDER_ID}
+KUBELET_EXTRA_ARGS=--cloud-provider=external --hostname-override=$${LOCAL_HOSTNAME}
 EOF
 
-echo "Kubelet provider ID configuration:"
+echo "Kubelet cloud provider configuration:"
 cat /etc/default/kubelet
 
 echo
@@ -183,6 +170,5 @@ $${JOIN_COMMAND}
 
 echo
 echo "Kubernetes ASG worker bootstrap completed."
-echo "Provider ID: $${AWS_PROVIDER_ID}"
 echo "Finished at: $(date -Is)"
 echo "Log file   : $${LOG_FILE}"

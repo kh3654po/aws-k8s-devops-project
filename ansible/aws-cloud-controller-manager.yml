@@ -1,0 +1,224 @@
+---
+- name: Install AWS Cloud Controller Manager
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  tasks:
+    - name: Check Kubernetes administrator kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: aws_ccm_kubeconfig
+
+    - name: Verify Kubernetes administrator kubeconfig
+      ansible.builtin.assert:
+        that:
+          - aws_ccm_kubeconfig.stat.exists
+        fail_msg: >-
+          Kubernetes administrator kubeconfig was not found at
+          {{ kubeconfig_path }}.
+        success_msg: Kubernetes administrator kubeconfig was found.
+
+    - name: Check Helm binary
+      ansible.builtin.stat:
+        path: "{{ helm_binary_path }}"
+      register: aws_ccm_helm
+
+    - name: Verify Helm binary
+      ansible.builtin.assert:
+        that:
+          - aws_ccm_helm.stat.exists
+          - aws_ccm_helm.stat.executable
+        fail_msg: >-
+          Helm binary was not found at {{ helm_binary_path }}.
+
+    - name: Add AWS Cloud Controller Manager Helm repository
+      ansible.builtin.command:
+        argv:
+          - "{{ helm_binary_path }}"
+          - repo
+          - add
+          - "{{ aws_ccm_repository_name }}"
+          - "{{ aws_ccm_repository_url }}"
+          - --force-update
+      register: aws_ccm_repo_add
+      changed_when: >-
+        'has been added' in aws_ccm_repo_add.stdout or
+        'has been updated' in aws_ccm_repo_add.stdout
+
+    - name: Update Helm repositories
+      ansible.builtin.command:
+        argv:
+          - "{{ helm_binary_path }}"
+          - repo
+          - update
+      changed_when: false
+
+    - name: Verify AWS CCM chart version
+      ansible.builtin.command:
+        argv:
+          - "{{ helm_binary_path }}"
+          - search
+          - repo
+          - "{{ aws_ccm_chart }}"
+          - --version
+          - "{{ aws_ccm_chart_version }}"
+      register: aws_ccm_chart_search
+      changed_when: false
+      failed_when: aws_ccm_chart_version not in aws_ccm_chart_search.stdout
+
+    - name: Render AWS CCM Helm values
+      ansible.builtin.template:
+        src: aws-cloud-controller-manager-values.yml.j2
+        dest: "{{ aws_ccm_values_remote_path }}"
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Validate AWS CCM Helm rendering
+      ansible.builtin.command:
+        argv:
+          - "{{ helm_binary_path }}"
+          - template
+          - "{{ aws_ccm_release_name }}"
+          - "{{ aws_ccm_chart }}"
+          - --namespace
+          - "{{ aws_ccm_namespace }}"
+          - --version
+          - "{{ aws_ccm_chart_version }}"
+          - --values
+          - "{{ aws_ccm_values_remote_path }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Install or upgrade AWS CCM
+      kubernetes.core.helm:
+        name: "{{ aws_ccm_release_name }}"
+        chart_ref: "{{ aws_ccm_chart }}"
+        chart_version: "{{ aws_ccm_chart_version }}"
+        release_namespace: "{{ aws_ccm_namespace }}"
+        create_namespace: false
+
+        values_files:
+          - "{{ aws_ccm_values_remote_path }}"
+
+        kubeconfig: "{{ kubeconfig_path }}"
+        binary_path: "{{ helm_binary_path }}"
+
+        release_state: present
+        update_repo_cache: true
+        reset_values: true
+        wait: true
+        timeout: 5m0s
+        history_max: 10
+
+    - name: Wait for AWS CCM DaemonSet to schedule a Pod
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        DESIRED="$(
+          kubectl get daemonset aws-cloud-controller-manager \
+            --namespace {{ aws_ccm_namespace }} \
+            --output=jsonpath='{.status.desiredNumberScheduled}'
+        )"
+
+        if [ -z "${DESIRED}" ] || [ "${DESIRED}" -lt 1 ]; then
+          exit 1
+        fi
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: aws_ccm_daemonset_scheduling
+      retries: 30
+      delay: 5
+      until: aws_ccm_daemonset_scheduling.rc == 0
+      changed_when: false
+
+    - name: Wait for AWS CCM DaemonSet rollout
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - daemonset/aws-cloud-controller-manager
+          - --namespace
+          - "{{ aws_ccm_namespace }}"
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Wait for AWS CCM to initialize control plane node
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        TAINTS="$(
+          kubectl get nodes \
+            --output=jsonpath='{range .items[0].spec.taints[*]}{.key}{"\n"}{end}'
+        )"
+
+        PROVIDER_ID="$(
+          kubectl get nodes \
+            --output=jsonpath='{.items[0].spec.providerID}'
+        )"
+
+        if echo "${TAINTS}" |
+          grep -q '^node.cloudprovider.kubernetes.io/uninitialized$'; then
+          exit 1
+        fi
+
+        if [ -z "${PROVIDER_ID}" ]; then
+          exit 1
+        fi
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: aws_ccm_node_initialization
+      retries: 60
+      delay: 5
+      until: aws_ccm_node_initialization.rc == 0
+      changed_when: false
+
+    - name: Get AWS CCM Pods
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pods
+          - --namespace
+          - "{{ aws_ccm_namespace }}"
+          - --selector
+          - k8s-app=aws-cloud-controller-manager
+          - --output
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: aws_ccm_pods
+      changed_when: false
+
+    - name: Get Kubernetes cloud node metadata
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - nodes
+          - -o
+          - custom-columns=NAME:.metadata.name,PROVIDER_ID:.spec.providerID,REGION:.metadata.labels.topology\.kubernetes\.io/region,ZONE:.metadata.labels.topology\.kubernetes\.io/zone
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: aws_ccm_nodes
+      changed_when: false
+
+    - name: Show AWS CCM Pods
+      ansible.builtin.debug:
+        msg: "{{ aws_ccm_pods.stdout_lines }}"
+
+    - name: Show Kubernetes cloud node metadata
+      ansible.builtin.debug:
+        msg: "{{ aws_ccm_nodes.stdout_lines }}"

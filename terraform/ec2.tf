@@ -67,8 +67,10 @@ resource "aws_instance" "master" {
   }
 
   tags = {
-    Name = "${var.prefix}-k8s-master"
-    Role = "master"
+    Name                                        = "${var.prefix}-k8s-master"
+    Role                                        = "master"
+    Project                                     = var.cluster_name
+    "kubernetes.io/cluster/${var.cluster_name}" = "owned"
   }
 }
 
@@ -109,7 +111,9 @@ resource "aws_instance" "worker" {
   }
 
   tags = {
-    Name = "${var.prefix}-k8s-worker-${count.index + 1}"
-    Role = "worker"
+    Name                                        = "${var.prefix}-k8s-worker-${count.index + 1}"
+    Role                                        = "worker"
+    Project                                     = var.cluster_name
+    "kubernetes.io/cluster/${var.cluster_name}" = "owned"
   }
 }

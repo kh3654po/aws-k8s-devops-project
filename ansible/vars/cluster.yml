@@ -412,3 +412,17 @@ grafana_loki_datasource_uid: loki
 
 grafana_loki_datasource_url: >-
   http://{{ loki_release_name }}-gateway.{{ loki_namespace }}.svc.cluster.local
+
+# AWS Cloud Controller Manager
+aws_ccm_repository_name: aws-cloud-controller-manager
+aws_ccm_repository_url: https://kubernetes.github.io/cloud-provider-aws
+
+aws_ccm_chart: aws-cloud-controller-manager/aws-cloud-controller-manager
+aws_ccm_chart_version: "0.0.11"
+
+aws_ccm_release_name: aws-cloud-controller-manager
+aws_ccm_namespace: kube-system
+
+aws_ccm_image_tag: "v1.36.1"
+
+aws_ccm_values_remote_path: /tmp/aws-cloud-controller-manager-values.yml

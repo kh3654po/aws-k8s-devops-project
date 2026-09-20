@@ -40,23 +40,6 @@
         enabled: true
         state: started
 
-    - name: Wait for worker node to become Ready
-      ansible.builtin.command:
-        argv:
-          - kubectl
-          - wait
-          - --for=condition=Ready
-          - "node/{{ ansible_facts['hostname'] }}"
-          - --timeout=300s
-      environment:
-        KUBECONFIG: "{{ kubeconfig_path }}"
-      delegate_to: "{{ groups['masters'][0] }}"
-      changed_when: false
-
-    - name: Configure AWS provider ID for joined worker
-      ansible.builtin.include_tasks:
-        file: tasks/configure-node-provider-id.yml
-
     - name: Wait for Calico DaemonSet rollout
       ansible.builtin.command:
         argv:
