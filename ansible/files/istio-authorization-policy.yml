@@ -1,0 +1,36 @@
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: istio-nginx-default-deny
+
+spec:
+  selector:
+    matchLabels:
+      app: istio-nginx
+
+  action: ALLOW
+
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: istio-nginx-allow-client
+
+spec:
+  selector:
+    matchLabels:
+      app: istio-nginx
+
+  action: ALLOW
+
+  rules:
+    - from:
+        - source:
+            serviceAccounts:
+              - istio-test/istio-client
+
+      to:
+        - operation:
+            methods:
+              - GET

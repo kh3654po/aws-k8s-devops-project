@@ -503,3 +503,21 @@ istio_canary_virtualservice_template_local_path: templates/istio-canary-virtuals
 istio_canary_virtualservice_remote_path: /tmp/istio-canary-virtualservice.yml
 
 istio_canary_request_count: 200
+
+# Istio Authorization Test
+istio_authorization_target_app: istio-nginx
+istio_authorization_target_service: istio-nginx
+
+istio_authorized_service_account: istio-client
+
+istio_unauthorized_client_app: istio-unauthorized-client
+istio_unauthorized_service_account: istio-unauthorized-client
+
+istio_authorization_client_manifest_local_path: files/istio-authorization-client.yml
+istio_authorization_client_manifest_remote_path: /tmp/istio-authorization-client.yml
+
+istio_authorization_policy_manifest_local_path: files/istio-authorization-policy.yml
+istio_authorization_policy_manifest_remote_path: /tmp/istio-authorization-policy.yml
+
+istio_authorization_default_deny_policy: istio-nginx-default-deny
+istio_authorization_allow_policy: istio-nginx-allow-client

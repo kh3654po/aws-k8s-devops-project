@@ -1,0 +1,486 @@
+---
+- name: Verify Istio AuthorizationPolicy and Zero Trust
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  tasks:
+    - name: Check Kubernetes administrator kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: istio_authorization_kubeconfig
+
+    - name: Verify Kubernetes administrator kubeconfig
+      ansible.builtin.assert:
+        that:
+          - istio_authorization_kubeconfig.stat.exists
+        fail_msg: >-
+          Kubernetes administrator kubeconfig was not found at
+          {{ kubeconfig_path }}.
+
+    - name: Verify Istiod is available
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - wait
+          - --for=condition=Available
+          - deployment/istiod
+          - --namespace
+          - "{{ istio_namespace }}"
+          - --timeout=180s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Verify Istio CNI DaemonSet rollout
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - daemonset/istio-cni-node
+          - --namespace
+          - "{{ istio_namespace }}"
+          - --timeout=180s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Verify authorized Istio client
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment/{{ istio_test_client_app }}
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --timeout=180s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Verify authorization target
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment/{{ istio_authorization_target_app }}
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --timeout=180s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Verify STRICT PeerAuthentication exists
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        MODE="$(
+          kubectl get peerauthentication default \
+            --namespace {{ istio_test_namespace }} \
+            --output=jsonpath='{.spec.mtls.mode}'
+        )"
+
+        echo "mtls_mode=${MODE}"
+
+        if [ "${MODE}" != "STRICT" ]; then
+          echo "STRICT mTLS is required for identity based authorization."
+          exit 1
+        fi
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Copy unauthorized client manifest
+      ansible.builtin.copy:
+        src: "{{ istio_authorization_client_manifest_local_path }}"
+        dest: "{{ istio_authorization_client_manifest_remote_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Validate unauthorized client manifest
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - --dry-run=server
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --filename
+          - "{{ istio_authorization_client_manifest_remote_path }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Apply unauthorized client
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --filename
+          - "{{ istio_authorization_client_manifest_remote_path }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_unauthorized_client_apply
+      changed_when: >-
+        'created' in istio_unauthorized_client_apply.stdout or
+        'configured' in istio_unauthorized_client_apply.stdout
+
+    - name: Wait for unauthorized client
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment/{{ istio_unauthorized_client_app }}
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Verify unauthorized client contains istio-proxy
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        POD="$(
+          kubectl get pods \
+            --namespace {{ istio_test_namespace }} \
+            --selector app={{ istio_unauthorized_client_app }} \
+            --output=jsonpath='{.items[0].metadata.name}'
+        )"
+
+        CONTAINERS="$(
+          kubectl get pod "${POD}" \
+            --namespace {{ istio_test_namespace }} \
+            --output=jsonpath='{.spec.containers[*].name}'
+        )"
+
+        INIT_CONTAINERS="$(
+          kubectl get pod "${POD}" \
+            --namespace {{ istio_test_namespace }} \
+            --output=jsonpath='{.spec.initContainers[*].name}'
+        )"
+
+        echo "pod=${POD}"
+        echo "containers=${CONTAINERS}"
+        echo "initContainers=${INIT_CONTAINERS}"
+
+        if ! printf '%s\n%s\n' \
+          "${CONTAINERS}" \
+          "${INIT_CONTAINERS}" |
+          tr ' ' '\n' |
+          grep -qx 'istio-proxy'; then
+
+          echo "istio-proxy was not found."
+          exit 1
+        fi
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Copy authorization policy manifest
+      ansible.builtin.copy:
+        src: "{{ istio_authorization_policy_manifest_local_path }}"
+        dest: "{{ istio_authorization_policy_manifest_remote_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Validate authorization policy manifest
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - --dry-run=server
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --filename
+          - "{{ istio_authorization_policy_manifest_remote_path }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Remove previous authorization test policies
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - delete
+          - authorizationpolicy
+          - "{{ istio_authorization_default_deny_policy }}"
+          - "{{ istio_authorization_allow_policy }}"
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --ignore-not-found=true
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Verify authorized client can access target before policy
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        STATUS="$(
+          kubectl exec \
+            --namespace {{ istio_test_namespace }} \
+            deployment/{{ istio_test_client_app }} \
+            --container {{ istio_test_client_app }} \
+            -- \
+            curl \
+              --silent \
+              --show-error \
+              --output /dev/null \
+              --write-out '%{http_code}' \
+              --max-time 5 \
+              http://{{ istio_authorization_target_service }}/
+        )"
+
+        echo "authorized_baseline_status=${STATUS}"
+
+        test "${STATUS}" = "200"
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_authorized_baseline
+      retries: 10
+      delay: 2
+      until: istio_authorized_baseline.rc == 0
+      changed_when: false
+
+    - name: Verify unauthorized client can access target before policy
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        STATUS="$(
+          kubectl exec \
+            --namespace {{ istio_test_namespace }} \
+            deployment/{{ istio_unauthorized_client_app }} \
+            --container {{ istio_unauthorized_client_app }} \
+            -- \
+            curl \
+              --silent \
+              --show-error \
+              --output /dev/null \
+              --write-out '%{http_code}' \
+              --max-time 5 \
+              http://{{ istio_authorization_target_service }}/
+        )"
+
+        echo "unauthorized_baseline_status=${STATUS}"
+
+        test "${STATUS}" = "200"
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_unauthorized_baseline
+      retries: 10
+      delay: 2
+      until: istio_unauthorized_baseline.rc == 0
+      changed_when: false
+
+    - name: Apply authorization policies
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --filename
+          - "{{ istio_authorization_policy_manifest_remote_path }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_authorization_policy_apply
+      changed_when: >-
+        'created' in istio_authorization_policy_apply.stdout or
+        'configured' in istio_authorization_policy_apply.stdout
+
+    - name: Verify authorized client remains allowed
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        STATUS="$(
+          kubectl exec \
+            --namespace {{ istio_test_namespace }} \
+            deployment/{{ istio_test_client_app }} \
+            --container {{ istio_test_client_app }} \
+            -- \
+            curl \
+              --silent \
+              --show-error \
+              --output /dev/null \
+              --write-out '%{http_code}' \
+              --max-time 5 \
+              http://{{ istio_authorization_target_service }}/
+        )"
+
+        echo "authorized_status=${STATUS}"
+
+        test "${STATUS}" = "200"
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_authorized_result
+      retries: 10
+      delay: 2
+      until: istio_authorized_result.rc == 0
+      changed_when: false
+
+    - name: Verify unauthorized client is denied
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        STATUS="$(
+          kubectl exec \
+            --namespace {{ istio_test_namespace }} \
+            deployment/{{ istio_unauthorized_client_app }} \
+            --container {{ istio_unauthorized_client_app }} \
+            -- \
+            curl \
+              --silent \
+              --show-error \
+              --output /dev/null \
+              --write-out '%{http_code}' \
+              --max-time 5 \
+              http://{{ istio_authorization_target_service }}/
+        )"
+
+        echo "unauthorized_status=${STATUS}"
+
+        test "${STATUS}" = "403"
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_unauthorized_result
+      retries: 10
+      delay: 2
+      until: istio_unauthorized_result.rc == 0
+      changed_when: false
+
+    - name: Verify POST from authorized identity is denied
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        STATUS="$(
+          kubectl exec \
+            --namespace {{ istio_test_namespace }} \
+            deployment/{{ istio_test_client_app }} \
+            --container {{ istio_test_client_app }} \
+            -- \
+            curl \
+              --silent \
+              --show-error \
+              --request POST \
+              --output /dev/null \
+              --write-out '%{http_code}' \
+              --max-time 5 \
+              http://{{ istio_authorization_target_service }}/
+        )"
+
+        echo "authorized_post_status=${STATUS}"
+
+        test "${STATUS}" = "403"
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_authorized_post_result
+      retries: 10
+      delay: 2
+      until: istio_authorized_post_result.rc == 0
+      changed_when: false
+
+    - name: Get authorized client ServiceAccount
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - deployment
+          - "{{ istio_test_client_app }}"
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --output=jsonpath={.spec.template.spec.serviceAccountName}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_authorized_service_account_result
+      changed_when: false
+
+    - name: Get unauthorized client ServiceAccount
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - deployment
+          - "{{ istio_unauthorized_client_app }}"
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --output=jsonpath={.spec.template.spec.serviceAccountName}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_unauthorized_service_account_result
+      changed_when: false
+
+    - name: Get AuthorizationPolicies
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - authorizationpolicy
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --output=wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_authorization_policies
+      changed_when: false
+
+    - name: Show baseline results
+      ansible.builtin.debug:
+        msg:
+          - "{{ istio_authorized_baseline.stdout_lines }}"
+          - "{{ istio_unauthorized_baseline.stdout_lines }}"
+
+    - name: Show authorized GET result
+      ansible.builtin.debug:
+        msg: "{{ istio_authorized_result.stdout_lines }}"
+
+    - name: Show unauthorized GET result
+      ansible.builtin.debug:
+        msg: "{{ istio_unauthorized_result.stdout_lines }}"
+
+    - name: Show authorized POST result
+      ansible.builtin.debug:
+        msg: "{{ istio_authorized_post_result.stdout_lines }}"
+
+    - name: Show workload identities
+      ansible.builtin.debug:
+        msg:
+          - >-
+            authorized_service_account={{
+              istio_authorized_service_account_result.stdout
+            }}
+          - >-
+            unauthorized_service_account={{
+              istio_unauthorized_service_account_result.stdout
+            }}
+
+    - name: Show AuthorizationPolicies
+      ansible.builtin.debug:
+        msg: "{{ istio_authorization_policies.stdout_lines }}"

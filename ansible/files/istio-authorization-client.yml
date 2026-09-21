@@ -1,0 +1,46 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: istio-unauthorized-client
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: istio-unauthorized-client
+
+  labels:
+    app: istio-unauthorized-client
+
+spec:
+  replicas: 1
+
+  selector:
+    matchLabels:
+      app: istio-unauthorized-client
+
+  template:
+    metadata:
+      labels:
+        app: istio-unauthorized-client
+
+    spec:
+      serviceAccountName: istio-unauthorized-client
+
+      containers:
+        - name: istio-unauthorized-client
+          image: curlimages/curl:8.12.1
+
+          command:
+            - sleep
+            - infinity
+
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+
+            limits:
+              cpu: 100m
+              memory: 64Mi
