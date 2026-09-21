@@ -441,6 +441,14 @@ istio_base_chart: istio/base
 istio_base_release_name: istio-base
 istio_base_values_remote_path: /tmp/istio-base-values.yml
 
+# Istio CNI
+istio_cni_chart: istio/cni
+istio_cni_release_name: istio-cni
+istio_cni_values_remote_path: /tmp/istio-cni-values.yml
+
+istio_cni_bin_dir: /opt/cni/bin
+istio_cni_conf_dir: /etc/cni/net.d
+
 # Istiod
 istiod_chart: istio/istiod
 istiod_release_name: istiod

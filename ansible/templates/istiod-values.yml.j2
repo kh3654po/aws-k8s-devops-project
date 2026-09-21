@@ -1,0 +1,25 @@
+---
+global:
+  istioNamespace: "{{ istio_namespace }}"
+
+  multiCluster:
+    clusterName: "{{ cluster_name }}"
+
+autoscaleEnabled: false
+
+replicaCount: 1
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 512Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi
+
+cni:
+  enabled: true
+  provider: default
+
+meshConfig:
+  enablePrometheusMerge: true
