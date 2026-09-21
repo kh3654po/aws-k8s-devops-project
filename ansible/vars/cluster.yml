@@ -484,3 +484,16 @@ istio_routing_workload_manifest_remote_path: /tmp/istio-routing-test.yml
 
 istio_routing_policy_manifest_local_path: files/istio-routing-policy.yml
 istio_routing_policy_manifest_remote_path: /tmp/istio-routing-policy.yml
+
+# Istio Resilience Test
+istio_resilience_app: istio-resilience-demo
+istio_resilience_service: istio-resilience-demo
+
+istio_resilience_workload_manifest_local_path: files/istio-resilience-test.yml
+istio_resilience_workload_manifest_remote_path: /tmp/istio-resilience-test.yml
+
+istio_resilience_policy_manifest_local_path: files/istio-resilience-policy.yml
+istio_resilience_policy_manifest_remote_path: /tmp/istio-resilience-policy.yml
+
+istio_circuit_breaker_policy_manifest_local_path: files/istio-circuit-breaker-policy.yml
+istio_circuit_breaker_policy_manifest_remote_path: /tmp/istio-circuit-breaker-policy.yml
