@@ -474,3 +474,13 @@ istio_mtls_plain_client_manifest_remote_path: /tmp/istio-mtls-plain-client.yml
 
 istio_mtls_strict_manifest_local_path: files/istio-mtls-strict.yml
 istio_mtls_strict_manifest_remote_path: /tmp/istio-mtls-strict.yml
+
+# Istio Traffic Routing Test
+istio_routing_app: istio-routing-demo
+istio_routing_service: istio-routing-demo
+
+istio_routing_workload_manifest_local_path: files/istio-routing-test.yml
+istio_routing_workload_manifest_remote_path: /tmp/istio-routing-test.yml
+
+istio_routing_policy_manifest_local_path: files/istio-routing-policy.yml
+istio_routing_policy_manifest_remote_path: /tmp/istio-routing-policy.yml

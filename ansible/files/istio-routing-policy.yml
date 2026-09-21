@@ -1,0 +1,47 @@
+---
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: istio-routing-demo
+
+spec:
+  host: istio-routing-demo
+
+  subsets:
+    - name: v1
+      labels:
+        version: v1
+
+    - name: v2
+      labels:
+        version: v2
+
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: istio-routing-demo
+
+spec:
+  hosts:
+    - istio-routing-demo
+
+  http:
+    - name: route-v2-by-header
+
+      match:
+        - headers:
+            x-version:
+              exact: v2
+
+      route:
+        - destination:
+            host: istio-routing-demo
+            subset: v2
+
+    - name: default-route-v1
+
+      route:
+        - destination:
+            host: istio-routing-demo
+            subset: v1

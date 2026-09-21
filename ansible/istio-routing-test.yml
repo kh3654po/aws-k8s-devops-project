@@ -1,0 +1,507 @@
+---
+- name: Verify Istio VirtualService and DestinationRule routing
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  tasks:
+    - name: Check Kubernetes administrator kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: istio_routing_kubeconfig
+
+    - name: Verify Kubernetes administrator kubeconfig
+      ansible.builtin.assert:
+        that:
+          - istio_routing_kubeconfig.stat.exists
+        fail_msg: >-
+          Kubernetes administrator kubeconfig was not found at
+          {{ kubeconfig_path }}.
+
+    - name: Verify Istiod is available
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - wait
+          - --for=condition=Available
+          - deployment/istiod
+          - --namespace
+          - "{{ istio_namespace }}"
+          - --timeout=180s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Verify Istio CNI DaemonSet rollout
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - daemonset/istio-cni-node
+          - --namespace
+          - "{{ istio_namespace }}"
+          - --timeout=180s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Verify Istio test namespace exists
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - namespace
+          - "{{ istio_test_namespace }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Verify sidecar injection is enabled
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - namespace
+          - "{{ istio_test_namespace }}"
+          - --output=jsonpath={.metadata.labels.istio-injection}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_routing_injection
+      changed_when: false
+      failed_when: istio_routing_injection.stdout | trim != 'enabled'
+
+    - name: Verify Istio test client is available
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - wait
+          - --for=condition=Available
+          - deployment/{{ istio_test_client_app }}
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --timeout=180s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Copy Istio routing workload manifest
+      ansible.builtin.copy:
+        src: "{{ istio_routing_workload_manifest_local_path }}"
+        dest: "{{ istio_routing_workload_manifest_remote_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Validate Istio routing workload manifest
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - --dry-run=server
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --filename
+          - "{{ istio_routing_workload_manifest_remote_path }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Apply Istio routing workload
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --filename
+          - "{{ istio_routing_workload_manifest_remote_path }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_routing_workload_apply
+      changed_when: >-
+        'created' in istio_routing_workload_apply.stdout or
+        'configured' in istio_routing_workload_apply.stdout
+
+    - name: Wait for routing demo v1
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment/{{ istio_routing_app }}-v1
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Wait for routing demo v2
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment/{{ istio_routing_app }}-v2
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Verify routing demo pods contain istio-proxy
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        PODS="$(
+          kubectl get pods \
+            --namespace {{ istio_test_namespace }} \
+            --selector app={{ istio_routing_app }} \
+            --output=name
+        )"
+
+        if [ -z "${PODS}" ]; then
+          echo "No routing demo pods were found."
+          exit 1
+        fi
+
+        for POD in ${PODS}; do
+          CONTAINERS="$(
+            kubectl get "${POD}" \
+              --namespace {{ istio_test_namespace }} \
+              --output=jsonpath='{.spec.containers[*].name}'
+          )"
+
+          INIT_CONTAINERS="$(
+            kubectl get "${POD}" \
+              --namespace {{ istio_test_namespace }} \
+              --output=jsonpath='{.spec.initContainers[*].name}'
+          )"
+
+          echo "${POD}"
+          echo "  containers=${CONTAINERS}"
+          echo "  initContainers=${INIT_CONTAINERS}"
+
+          if ! printf '%s\n%s\n' \
+            "${CONTAINERS}" \
+            "${INIT_CONTAINERS}" |
+            tr ' ' '\n' |
+            grep -qx 'istio-proxy'; then
+
+            echo "${POD} does not contain istio-proxy."
+            exit 1
+          fi
+        done
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Get routing service endpoints
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - endpoints
+          - "{{ istio_routing_service }}"
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --output=wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_routing_endpoints
+      changed_when: false
+
+    - name: Verify v1 and v2 ready pods exist
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        V1_READY="$(
+          kubectl get pods \
+            --namespace {{ istio_test_namespace }} \
+            --selector app={{ istio_routing_app }},version=v1 \
+            --field-selector=status.phase=Running \
+            --output=name |
+          wc -l
+        )"
+
+        V2_READY="$(
+          kubectl get pods \
+            --namespace {{ istio_test_namespace }} \
+            --selector app={{ istio_routing_app }},version=v2 \
+            --field-selector=status.phase=Running \
+            --output=name |
+          wc -l
+        )"
+
+        echo "v1_running=${V1_READY}"
+        echo "v2_running=${V2_READY}"
+
+        test "${V1_READY}" -ge 1
+        test "${V2_READY}" -ge 1
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Copy Istio routing policy manifest
+      ansible.builtin.copy:
+        src: "{{ istio_routing_policy_manifest_local_path }}"
+        dest: "{{ istio_routing_policy_manifest_remote_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Validate Istio routing policy
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - --dry-run=server
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --filename
+          - "{{ istio_routing_policy_manifest_remote_path }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Apply Istio routing policy
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --filename
+          - "{{ istio_routing_policy_manifest_remote_path }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_routing_policy_apply
+      changed_when: >-
+        'created' in istio_routing_policy_apply.stdout or
+        'configured' in istio_routing_policy_apply.stdout
+
+    - name: Verify DestinationRule subsets
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        SUBSETS="$(
+          kubectl get destinationrule {{ istio_routing_service }} \
+            --namespace {{ istio_test_namespace }} \
+            --output=jsonpath='{range .spec.subsets[*]}{.name}{"\n"}{end}'
+        )"
+
+        echo "${SUBSETS}"
+
+        printf '%s\n' "${SUBSETS}" | grep -qx 'v1'
+        printf '%s\n' "${SUBSETS}" | grep -qx 'v2'
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Verify VirtualService exists
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - virtualservice
+          - "{{ istio_routing_service }}"
+          - --namespace
+          - "{{ istio_test_namespace }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Verify default traffic routes only to v1
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        for REQUEST in 1 2 3 4 5; do
+          RESPONSE="$(
+            kubectl exec \
+              --namespace {{ istio_test_namespace }} \
+              deployment/{{ istio_test_client_app }} \
+              --container {{ istio_test_client_app }} \
+              -- \
+              curl \
+                --silent \
+                --show-error \
+                --fail \
+                --max-time 5 \
+                http://{{ istio_routing_service }}/
+          )"
+
+          echo "request=${REQUEST} response=${RESPONSE}"
+
+          if [ "${RESPONSE}" != "version=v1" ]; then
+            echo "Expected version=v1 but received ${RESPONSE}."
+            exit 1
+          fi
+        done
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_default_route_test
+      retries: 10
+      delay: 3
+      until: istio_default_route_test.rc == 0
+      changed_when: false
+
+    - name: Verify x-version header routes traffic only to v2
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        for REQUEST in 1 2 3 4 5; do
+          RESPONSE="$(
+            kubectl exec \
+              --namespace {{ istio_test_namespace }} \
+              deployment/{{ istio_test_client_app }} \
+              --container {{ istio_test_client_app }} \
+              -- \
+              curl \
+                --silent \
+                --show-error \
+                --fail \
+                --max-time 5 \
+                --header 'x-version: v2' \
+                http://{{ istio_routing_service }}/
+          )"
+
+          echo "request=${REQUEST} response=${RESPONSE}"
+
+          if [ "${RESPONSE}" != "version=v2" ]; then
+            echo "Expected version=v2 but received ${RESPONSE}."
+            exit 1
+          fi
+        done
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_v2_header_route_test
+      retries: 10
+      delay: 3
+      until: istio_v2_header_route_test.rc == 0
+      changed_when: false
+
+    - name: Verify Envoy contains v1 and v2 subset clusters
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        CLIENT_POD="$(
+          kubectl get pods \
+            --namespace {{ istio_test_namespace }} \
+            --selector app={{ istio_test_client_app }} \
+            --output=jsonpath='{.items[0].metadata.name}'
+        )"
+
+        CLUSTERS="$(
+          kubectl exec \
+            --namespace {{ istio_test_namespace }} \
+            "${CLIENT_POD}" \
+            --container istio-proxy \
+            -- \
+            pilot-agent request GET clusters
+        )"
+
+        V1_CLUSTER='outbound|80|v1|{{ istio_routing_service }}.{{ istio_test_namespace }}.svc.cluster.local'
+        V2_CLUSTER='outbound|80|v2|{{ istio_routing_service }}.{{ istio_test_namespace }}.svc.cluster.local'
+
+        if ! grep -Fq "${V1_CLUSTER}" <<< "${CLUSTERS}"; then
+          echo "Envoy v1 subset cluster was not found."
+          exit 1
+        fi
+
+        if ! grep -Fq "${V2_CLUSTER}" <<< "${CLUSTERS}"; then
+          echo "Envoy v2 subset cluster was not found."
+          exit 1
+        fi
+
+        echo "v1_cluster=${V1_CLUSTER}"
+        echo "v2_cluster=${V2_CLUSTER}"
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_subset_clusters
+      retries: 10
+      delay: 3
+      until: istio_subset_clusters.rc == 0
+      changed_when: false
+
+    - name: Get routing demo pods
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pods
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --selector
+          - app={{ istio_routing_app }}
+          - --output=wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_routing_pods
+      changed_when: false
+
+    - name: Get DestinationRule
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - destinationrule
+          - "{{ istio_routing_service }}"
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --output=yaml
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_destination_rule
+      changed_when: false
+
+    - name: Get VirtualService
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - virtualservice
+          - "{{ istio_routing_service }}"
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --output=yaml
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_virtual_service
+      changed_when: false
+
+    - name: Show routing demo pods
+      ansible.builtin.debug:
+        msg: "{{ istio_routing_pods.stdout_lines }}"
+
+    - name: Show routing service endpoints
+      ansible.builtin.debug:
+        msg: "{{ istio_routing_endpoints.stdout_lines }}"
+
+    - name: Show default v1 route result
+      ansible.builtin.debug:
+        msg: "{{ istio_default_route_test.stdout_lines }}"
+
+    - name: Show header based v2 route result
+      ansible.builtin.debug:
+        msg: "{{ istio_v2_header_route_test.stdout_lines }}"
+
+    - name: Show Envoy subset clusters
+      ansible.builtin.debug:
+        msg: "{{ istio_subset_clusters.stdout_lines }}"
