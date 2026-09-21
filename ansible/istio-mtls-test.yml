@@ -1,0 +1,564 @@
+---
+- name: Verify Istio service-to-service mutual TLS
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  tasks:
+    - name: Check Kubernetes administrator kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: istio_mtls_kubeconfig
+
+    - name: Verify Kubernetes administrator kubeconfig
+      ansible.builtin.assert:
+        that:
+          - istio_mtls_kubeconfig.stat.exists
+        fail_msg: >-
+          Kubernetes administrator kubeconfig was not found at
+          {{ kubeconfig_path }}.
+
+    - name: Verify Istiod is available
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - wait
+          - --for=condition=Available
+          - deployment/istiod
+          - --namespace
+          - "{{ istio_namespace }}"
+          - --timeout=180s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Verify Istio CNI DaemonSet rollout
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - daemonset/istio-cni-node
+          - --namespace
+          - "{{ istio_namespace }}"
+          - --timeout=180s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Verify Istio client deployment is available
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - wait
+          - --for=condition=Available
+          - deployment/{{ istio_test_client_app }}
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --timeout=180s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Verify Istio nginx deployment is available
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - wait
+          - --for=condition=Available
+          - deployment/{{ istio_test_server_app }}
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --timeout=180s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Ensure plain client namespace exists
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        kubectl create namespace {{ istio_plain_test_namespace }} \
+          --dry-run=client \
+          --output=yaml |
+        kubectl apply --filename=-
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_plain_namespace
+      changed_when: >-
+        'created' in istio_plain_namespace.stdout or
+        'configured' in istio_plain_namespace.stdout
+
+    - name: Disable Istio sidecar injection in plain client namespace
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - label
+          - namespace
+          - "{{ istio_plain_test_namespace }}"
+          - istio-injection=disabled
+          - --overwrite
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Copy plain client manifest
+      ansible.builtin.copy:
+        src: "{{ istio_mtls_plain_client_manifest_local_path }}"
+        dest: "{{ istio_mtls_plain_client_manifest_remote_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Apply plain client
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - --namespace
+          - "{{ istio_plain_test_namespace }}"
+          - --filename
+          - "{{ istio_mtls_plain_client_manifest_remote_path }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_plain_client_apply
+      changed_when: >-
+        'created' in istio_plain_client_apply.stdout or
+        'configured' in istio_plain_client_apply.stdout
+
+    - name: Wait for plain client deployment
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment/{{ istio_mtls_plain_client_app }}
+          - --namespace
+          - "{{ istio_plain_test_namespace }}"
+          - --timeout=180s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Verify plain client has no Istio proxy
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        CONTAINERS="$(
+          kubectl get pods \
+            --namespace {{ istio_plain_test_namespace }} \
+            --selector app={{ istio_mtls_plain_client_app }} \
+            --output=jsonpath='{.items[0].spec.containers[*].name}'
+        )"
+
+        INIT_CONTAINERS="$(
+          kubectl get pods \
+            --namespace {{ istio_plain_test_namespace }} \
+            --selector app={{ istio_mtls_plain_client_app }} \
+            --output=jsonpath='{.items[0].spec.initContainers[*].name}'
+        )"
+
+        echo "containers=${CONTAINERS}"
+        echo "initContainers=${INIT_CONTAINERS}"
+
+        if printf '%s\n%s\n' \
+          "${CONTAINERS}" \
+          "${INIT_CONTAINERS}" |
+          tr ' ' '\n' |
+          grep -qx 'istio-proxy'; then
+
+          echo "Plain client unexpectedly contains istio-proxy."
+          exit 1
+        fi
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Check existing namespace mTLS policy
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - peerauthentication
+          - default
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --output=jsonpath={.spec.mtls.mode}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: existing_mtls_mode
+      changed_when: false
+      failed_when: false
+
+    - name: Verify mesh client can access nginx before STRICT
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        STATUS="$(
+          kubectl exec \
+            --namespace {{ istio_test_namespace }} \
+            deployment/{{ istio_test_client_app }} \
+            --container {{ istio_test_client_app }} \
+            -- \
+            curl \
+              --silent \
+              --show-error \
+              --output /dev/null \
+              --write-out '%{http_code}' \
+              --max-time 5 \
+              http://{{ istio_test_server_service }}/
+        )"
+
+        echo "mesh_client_status=${STATUS}"
+
+        test "${STATUS}" = "200"
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Verify plain client can access nginx before STRICT
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        STATUS="$(
+          kubectl exec \
+            --namespace {{ istio_plain_test_namespace }} \
+            deployment/{{ istio_mtls_plain_client_app }} \
+            --container {{ istio_mtls_plain_client_app }} \
+            -- \
+            curl \
+              --silent \
+              --show-error \
+              --output /dev/null \
+              --write-out '%{http_code}' \
+              --max-time 5 \
+              http://{{ istio_test_server_service }}.{{ istio_test_namespace }}.svc.cluster.local/
+        )"
+
+        echo "plain_client_status=${STATUS}"
+
+        test "${STATUS}" = "200"
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      when: existing_mtls_mode.stdout | trim != 'STRICT'
+      changed_when: false
+
+    - name: Copy STRICT PeerAuthentication manifest
+      ansible.builtin.copy:
+        src: "{{ istio_mtls_strict_manifest_local_path }}"
+        dest: "{{ istio_mtls_strict_manifest_remote_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Apply STRICT PeerAuthentication
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --filename
+          - "{{ istio_mtls_strict_manifest_remote_path }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_mtls_strict_apply
+      changed_when: >-
+        'created' in istio_mtls_strict_apply.stdout or
+        'configured' in istio_mtls_strict_apply.stdout
+
+    - name: Verify STRICT PeerAuthentication
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - peerauthentication
+          - default
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --output=jsonpath={.spec.mtls.mode}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_mtls_mode
+      changed_when: false
+      failed_when: istio_mtls_mode.stdout | trim != 'STRICT'
+
+    - name: Verify mesh client still succeeds under STRICT mTLS
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        STATUS="$(
+          kubectl exec \
+            --namespace {{ istio_test_namespace }} \
+            deployment/{{ istio_test_client_app }} \
+            --container {{ istio_test_client_app }} \
+            -- \
+            curl \
+              --silent \
+              --show-error \
+              --output /dev/null \
+              --write-out '%{http_code}' \
+              --max-time 5 \
+              http://{{ istio_test_server_service }}/
+        )"
+
+        echo "mesh_client_status=${STATUS}"
+
+        test "${STATUS}" = "200"
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: mesh_client_strict_test
+      retries: 20
+      delay: 3
+      until: mesh_client_strict_test.rc == 0
+      changed_when: false
+
+    - name: Verify plain client is rejected under STRICT mTLS
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        set +e
+
+        OUTPUT="$(
+          kubectl exec \
+            --namespace {{ istio_plain_test_namespace }} \
+            deployment/{{ istio_mtls_plain_client_app }} \
+            --container {{ istio_mtls_plain_client_app }} \
+            -- \
+            curl \
+              --silent \
+              --show-error \
+              --output /dev/null \
+              --write-out '%{http_code}' \
+              --max-time 5 \
+              http://{{ istio_test_server_service }}.{{ istio_test_namespace }}.svc.cluster.local/ \
+            2>&1
+        )"
+
+        RC=$?
+
+        set -e
+
+        echo "curl_rc=${RC}"
+        echo "curl_output=${OUTPUT}"
+
+        if [ "${RC}" -eq 0 ]; then
+          echo "Plain client unexpectedly succeeded."
+          exit 1
+        fi
+
+        echo "Plain client was rejected as expected."
+        exit 0
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: plain_client_strict_test
+      retries: 20
+      delay: 3
+      until: plain_client_strict_test.rc == 0
+      changed_when: false
+
+    - name: Generate mesh mTLS traffic
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        for REQUEST in 1 2 3 4 5; do
+          STATUS="$(
+            kubectl exec \
+              --namespace {{ istio_test_namespace }} \
+              deployment/{{ istio_test_client_app }} \
+              --container {{ istio_test_client_app }} \
+              -- \
+              curl \
+                --silent \
+                --show-error \
+                --output /dev/null \
+                --write-out '%{http_code}' \
+                --max-time 5 \
+                http://{{ istio_test_server_service }}/
+          )"
+
+          echo "request=${REQUEST} status=${STATUS}"
+
+          test "${STATUS}" = "200"
+        done
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_mtls_requests
+      changed_when: false
+
+    - name: Verify destination Envoy reports mutual TLS
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        SERVER_POD="$(
+          kubectl get pods \
+            --namespace {{ istio_test_namespace }} \
+            --selector app={{ istio_test_server_app }} \
+            --output=jsonpath='{.items[0].metadata.name}'
+        )"
+
+        METRICS="$(
+          kubectl exec \
+            --namespace {{ istio_test_namespace }} \
+            "${SERVER_POD}" \
+            --container istio-proxy \
+            -- \
+            pilot-agent request GET stats/prometheus
+        )"
+
+        MATCH="$(
+          printf '%s\n' "${METRICS}" |
+          grep 'istio_requests_total' |
+          grep 'connection_security_policy="mutual_tls"' |
+          grep 'source_principal="spiffe://cluster.local/ns/{{ istio_test_namespace }}/sa/{{ istio_test_client_app }}"' |
+          grep 'destination_principal="spiffe://cluster.local/ns/{{ istio_test_namespace }}/sa/{{ istio_test_server_app }}"' |
+          head -n 1
+        )"
+
+        if [ -z "${MATCH}" ]; then
+          echo "No mutual TLS Istio metric was found."
+          exit 1
+        fi
+
+        echo "${MATCH}"
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_mtls_metric
+      changed_when: false
+
+    - name: Verify client SPIFFE identity in Envoy certificate
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        CLIENT_POD="$(
+          kubectl get pods \
+            --namespace {{ istio_test_namespace }} \
+            --selector app={{ istio_test_client_app }} \
+            --output=jsonpath='{.items[0].metadata.name}'
+        )"
+
+        kubectl exec \
+          --namespace {{ istio_test_namespace }} \
+          "${CLIENT_POD}" \
+          --container istio-proxy \
+          -- \
+          pilot-agent request GET 'certs?format=json' |
+        grep -F \
+          'spiffe://cluster.local/ns/{{ istio_test_namespace }}/sa/{{ istio_test_client_app }}'
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_client_spiffe
+      changed_when: false
+
+    - name: Verify server SPIFFE identity in Envoy certificate
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        SERVER_POD="$(
+          kubectl get pods \
+            --namespace {{ istio_test_namespace }} \
+            --selector app={{ istio_test_server_app }} \
+            --output=jsonpath='{.items[0].metadata.name}'
+        )"
+
+        kubectl exec \
+          --namespace {{ istio_test_namespace }} \
+          "${SERVER_POD}" \
+          --container istio-proxy \
+          -- \
+          pilot-agent request GET 'certs?format=json' |
+        grep -F \
+          'spiffe://cluster.local/ns/{{ istio_test_namespace }}/sa/{{ istio_test_server_app }}'
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_server_spiffe
+      changed_when: false
+
+    - name: Get PeerAuthentication
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - peerauthentication
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --output=wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_peer_authentication
+      changed_when: false
+
+    - name: Get mesh test pods
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pods
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --output=wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_mtls_mesh_pods
+      changed_when: false
+
+    - name: Get plain client pod
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pods
+          - --namespace
+          - "{{ istio_plain_test_namespace }}"
+          - --output=wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_plain_pods
+      changed_when: false
+
+    - name: Show PeerAuthentication
+      ansible.builtin.debug:
+        msg: "{{ istio_peer_authentication.stdout_lines }}"
+
+    - name: Show mesh client STRICT result
+      ansible.builtin.debug:
+        msg: "{{ mesh_client_strict_test.stdout_lines }}"
+
+    - name: Show plain client rejection result
+      ansible.builtin.debug:
+        msg: "{{ plain_client_strict_test.stdout_lines }}"
+
+    - name: Show mutual TLS metric
+      ansible.builtin.debug:
+        msg: "{{ istio_mtls_metric.stdout_lines }}"
+
+    - name: Show client SPIFFE identity
+      ansible.builtin.debug:
+        msg: "{{ istio_client_spiffe.stdout_lines }}"
+
+    - name: Show server SPIFFE identity
+      ansible.builtin.debug:
+        msg: "{{ istio_server_spiffe.stdout_lines }}"

@@ -463,3 +463,14 @@ istio_sidecar_test_manifest_remote_path: /tmp/istio-sidecar-test.yml
 istio_test_client_app: istio-client
 istio_test_server_app: istio-nginx
 istio_test_server_service: istio-nginx
+
+# Istio mTLS Test
+istio_plain_test_namespace: istio-plain-test
+
+istio_mtls_plain_client_app: istio-plain-client
+
+istio_mtls_plain_client_manifest_local_path: files/istio-mtls-plain-client.yml
+istio_mtls_plain_client_manifest_remote_path: /tmp/istio-mtls-plain-client.yml
+
+istio_mtls_strict_manifest_local_path: files/istio-mtls-strict.yml
+istio_mtls_strict_manifest_remote_path: /tmp/istio-mtls-strict.yml
