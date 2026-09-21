@@ -1,0 +1,602 @@
+---
+- name: Verify Istio canary traffic splitting
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  tasks:
+    - name: Check Kubernetes administrator kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: istio_canary_kubeconfig
+
+    - name: Verify Kubernetes administrator kubeconfig
+      ansible.builtin.assert:
+        that:
+          - istio_canary_kubeconfig.stat.exists
+        fail_msg: >-
+          Kubernetes administrator kubeconfig was not found at
+          {{ kubeconfig_path }}.
+
+    - name: Verify Istiod is available
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - wait
+          - --for=condition=Available
+          - deployment/istiod
+          - --namespace
+          - "{{ istio_namespace }}"
+          - --timeout=180s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Verify Istio routing v1 deployment
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment/{{ istio_routing_app }}-v1
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --timeout=180s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Verify Istio routing v2 deployment
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment/{{ istio_routing_app }}-v2
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --timeout=180s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Verify Istio test client
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment/{{ istio_test_client_app }}
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --timeout=180s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Verify v1 and v2 DestinationRule subsets
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        SUBSETS="$(
+          kubectl get destinationrule {{ istio_routing_service }} \
+            --namespace {{ istio_test_namespace }} \
+            --output=jsonpath='{range .spec.subsets[*]}{.name}{"\n"}{end}'
+        )"
+
+        echo "${SUBSETS}"
+
+        if ! grep -qx 'v1' <<< "${SUBSETS}"; then
+          echo "DestinationRule subset v1 was not found."
+          exit 1
+        fi
+
+        if ! grep -qx 'v2' <<< "${SUBSETS}"; then
+          echo "DestinationRule subset v2 was not found."
+          exit 1
+        fi
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Copy original routing policy for restore
+      ansible.builtin.copy:
+        src: "{{ istio_routing_policy_manifest_local_path }}"
+        dest: "{{ istio_routing_policy_manifest_remote_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Run canary traffic migration
+      block:
+        - name: Render 100 0 canary VirtualService
+          ansible.builtin.template:
+            src: "{{ istio_canary_virtualservice_template_local_path }}"
+            dest: "{{ istio_canary_virtualservice_remote_path }}"
+            owner: root
+            group: root
+            mode: "0644"
+          vars:
+            istio_canary_v1_weight: 100
+            istio_canary_v2_weight: 0
+
+        - name: Apply 100 0 canary routing
+          ansible.builtin.command:
+            argv:
+              - kubectl
+              - apply
+              - --namespace
+              - "{{ istio_test_namespace }}"
+              - --filename
+              - "{{ istio_canary_virtualservice_remote_path }}"
+          environment:
+            KUBECONFIG: "{{ kubeconfig_path }}"
+          changed_when: false
+
+        - name: Verify 100 0 traffic distribution
+          ansible.builtin.shell: |
+            set -o pipefail
+
+            RESPONSES="$(
+              kubectl exec \
+                --namespace {{ istio_test_namespace }} \
+                deployment/{{ istio_test_client_app }} \
+                --container {{ istio_test_client_app }} \
+                -- \
+                sh -c '
+                  COUNT=1
+
+                  while [ "${COUNT}" -le {{ istio_canary_request_count }} ]; do
+                    curl \
+                      --silent \
+                      --show-error \
+                      --fail \
+                      --max-time 5 \
+                      http://{{ istio_routing_service }}/
+
+                    COUNT=$((COUNT + 1))
+                  done
+                '
+            )"
+
+            V1="$(
+              printf '%s\n' "${RESPONSES}" |
+              awk '
+                $0 == "version=v1" {
+                  count++
+                }
+
+                END {
+                  print count + 0
+                }
+              '
+            )"
+
+            V2="$(
+              printf '%s\n' "${RESPONSES}" |
+              awk '
+                $0 == "version=v2" {
+                  count++
+                }
+
+                END {
+                  print count + 0
+                }
+              '
+            )"
+
+            TOTAL=$((V1 + V2))
+
+            echo "v1=${V1}"
+            echo "v2=${V2}"
+            echo "total=${TOTAL}"
+
+            test "${TOTAL}" -eq {{ istio_canary_request_count }}
+            test "${V1}" -eq {{ istio_canary_request_count }}
+            test "${V2}" -eq 0
+          args:
+            executable: /bin/bash
+          environment:
+            KUBECONFIG: "{{ kubeconfig_path }}"
+          register: istio_canary_100_0
+          retries: 10
+          delay: 2
+          until: istio_canary_100_0.rc == 0
+          changed_when: false
+
+        - name: Render 90 10 canary VirtualService
+          ansible.builtin.template:
+            src: "{{ istio_canary_virtualservice_template_local_path }}"
+            dest: "{{ istio_canary_virtualservice_remote_path }}"
+            owner: root
+            group: root
+            mode: "0644"
+          vars:
+            istio_canary_v1_weight: 90
+            istio_canary_v2_weight: 10
+
+        - name: Apply 90 10 canary routing
+          ansible.builtin.command:
+            argv:
+              - kubectl
+              - apply
+              - --namespace
+              - "{{ istio_test_namespace }}"
+              - --filename
+              - "{{ istio_canary_virtualservice_remote_path }}"
+          environment:
+            KUBECONFIG: "{{ kubeconfig_path }}"
+          changed_when: false
+
+        - name: Verify 90 10 traffic distribution
+          ansible.builtin.shell: |
+            set -o pipefail
+
+            RESPONSES="$(
+              kubectl exec \
+                --namespace {{ istio_test_namespace }} \
+                deployment/{{ istio_test_client_app }} \
+                --container {{ istio_test_client_app }} \
+                -- \
+                sh -c '
+                  COUNT=1
+
+                  while [ "${COUNT}" -le {{ istio_canary_request_count }} ]; do
+                    curl \
+                      --silent \
+                      --show-error \
+                      --fail \
+                      --max-time 5 \
+                      http://{{ istio_routing_service }}/
+
+                    COUNT=$((COUNT + 1))
+                  done
+                '
+            )"
+
+            V1="$(
+              printf '%s\n' "${RESPONSES}" |
+              awk '
+                $0 == "version=v1" {
+                  count++
+                }
+
+                END {
+                  print count + 0
+                }
+              '
+            )"
+
+            V2="$(
+              printf '%s\n' "${RESPONSES}" |
+              awk '
+                $0 == "version=v2" {
+                  count++
+                }
+
+                END {
+                  print count + 0
+                }
+              '
+            )"
+
+            TOTAL=$((V1 + V2))
+
+            V2_PERCENT="$(
+              awk \
+                -v v2="${V2}" \
+                -v total="${TOTAL}" \
+                'BEGIN {
+                  if (total == 0) {
+                    print 0
+                    exit
+                  }
+
+                  printf "%.2f", (v2 / total) * 100
+                }'
+            )"
+
+            echo "v1=${V1}"
+            echo "v2=${V2}"
+            echo "total=${TOTAL}"
+            echo "v2_percent=${V2_PERCENT}"
+
+            test "${TOTAL}" -eq {{ istio_canary_request_count }}
+
+            awk \
+              -v percent="${V2_PERCENT}" \
+              'BEGIN {
+                if (percent < 3 || percent > 25) {
+                  exit 1
+                }
+              }'
+          args:
+            executable: /bin/bash
+          environment:
+            KUBECONFIG: "{{ kubeconfig_path }}"
+          register: istio_canary_90_10
+          retries: 5
+          delay: 2
+          until: istio_canary_90_10.rc == 0
+          changed_when: false
+
+        - name: Render 50 50 canary VirtualService
+          ansible.builtin.template:
+            src: "{{ istio_canary_virtualservice_template_local_path }}"
+            dest: "{{ istio_canary_virtualservice_remote_path }}"
+            owner: root
+            group: root
+            mode: "0644"
+          vars:
+            istio_canary_v1_weight: 50
+            istio_canary_v2_weight: 50
+
+        - name: Apply 50 50 canary routing
+          ansible.builtin.command:
+            argv:
+              - kubectl
+              - apply
+              - --namespace
+              - "{{ istio_test_namespace }}"
+              - --filename
+              - "{{ istio_canary_virtualservice_remote_path }}"
+          environment:
+            KUBECONFIG: "{{ kubeconfig_path }}"
+          changed_when: false
+
+        - name: Verify 50 50 traffic distribution
+          ansible.builtin.shell: |
+            set -o pipefail
+
+            RESPONSES="$(
+              kubectl exec \
+                --namespace {{ istio_test_namespace }} \
+                deployment/{{ istio_test_client_app }} \
+                --container {{ istio_test_client_app }} \
+                -- \
+                sh -c '
+                  COUNT=1
+
+                  while [ "${COUNT}" -le {{ istio_canary_request_count }} ]; do
+                    curl \
+                      --silent \
+                      --show-error \
+                      --fail \
+                      --max-time 5 \
+                      http://{{ istio_routing_service }}/
+
+                    COUNT=$((COUNT + 1))
+                  done
+                '
+            )"
+
+            V1="$(
+              printf '%s\n' "${RESPONSES}" |
+              awk '
+                $0 == "version=v1" {
+                  count++
+                }
+
+                END {
+                  print count + 0
+                }
+              '
+            )"
+
+            V2="$(
+              printf '%s\n' "${RESPONSES}" |
+              awk '
+                $0 == "version=v2" {
+                  count++
+                }
+
+                END {
+                  print count + 0
+                }
+              '
+            )"
+
+            TOTAL=$((V1 + V2))
+
+            V2_PERCENT="$(
+              awk \
+                -v v2="${V2}" \
+                -v total="${TOTAL}" \
+                'BEGIN {
+                  if (total == 0) {
+                    print 0
+                    exit
+                  }
+
+                  printf "%.2f", (v2 / total) * 100
+                }'
+            )"
+
+            echo "v1=${V1}"
+            echo "v2=${V2}"
+            echo "total=${TOTAL}"
+            echo "v2_percent=${V2_PERCENT}"
+
+            test "${TOTAL}" -eq {{ istio_canary_request_count }}
+
+            awk \
+              -v percent="${V2_PERCENT}" \
+              'BEGIN {
+                if (percent < 30 || percent > 70) {
+                  exit 1
+                }
+              }'
+          args:
+            executable: /bin/bash
+          environment:
+            KUBECONFIG: "{{ kubeconfig_path }}"
+          register: istio_canary_50_50
+          retries: 5
+          delay: 2
+          until: istio_canary_50_50.rc == 0
+          changed_when: false
+
+        - name: Render 0 100 canary VirtualService
+          ansible.builtin.template:
+            src: "{{ istio_canary_virtualservice_template_local_path }}"
+            dest: "{{ istio_canary_virtualservice_remote_path }}"
+            owner: root
+            group: root
+            mode: "0644"
+          vars:
+            istio_canary_v1_weight: 0
+            istio_canary_v2_weight: 100
+
+        - name: Apply 0 100 canary routing
+          ansible.builtin.command:
+            argv:
+              - kubectl
+              - apply
+              - --namespace
+              - "{{ istio_test_namespace }}"
+              - --filename
+              - "{{ istio_canary_virtualservice_remote_path }}"
+          environment:
+            KUBECONFIG: "{{ kubeconfig_path }}"
+          changed_when: false
+
+        - name: Verify 0 100 traffic distribution
+          ansible.builtin.shell: |
+            set -o pipefail
+
+            RESPONSES="$(
+              kubectl exec \
+                --namespace {{ istio_test_namespace }} \
+                deployment/{{ istio_test_client_app }} \
+                --container {{ istio_test_client_app }} \
+                -- \
+                sh -c '
+                  COUNT=1
+
+                  while [ "${COUNT}" -le {{ istio_canary_request_count }} ]; do
+                    curl \
+                      --silent \
+                      --show-error \
+                      --fail \
+                      --max-time 5 \
+                      http://{{ istio_routing_service }}/
+
+                    COUNT=$((COUNT + 1))
+                  done
+                '
+            )"
+
+            V1="$(
+              printf '%s\n' "${RESPONSES}" |
+              awk '
+                $0 == "version=v1" {
+                  count++
+                }
+
+                END {
+                  print count + 0
+                }
+              '
+            )"
+
+            V2="$(
+              printf '%s\n' "${RESPONSES}" |
+              awk '
+                $0 == "version=v2" {
+                  count++
+                }
+
+                END {
+                  print count + 0
+                }
+              '
+            )"
+
+            TOTAL=$((V1 + V2))
+
+            echo "v1=${V1}"
+            echo "v2=${V2}"
+            echo "total=${TOTAL}"
+
+            test "${TOTAL}" -eq {{ istio_canary_request_count }}
+            test "${V1}" -eq 0
+            test "${V2}" -eq {{ istio_canary_request_count }}
+          args:
+            executable: /bin/bash
+          environment:
+            KUBECONFIG: "{{ kubeconfig_path }}"
+          register: istio_canary_0_100
+          retries: 10
+          delay: 2
+          until: istio_canary_0_100.rc == 0
+          changed_when: false
+
+      always:
+        - name: Restore original header based routing policy
+          ansible.builtin.command:
+            argv:
+              - kubectl
+              - apply
+              - --namespace
+              - "{{ istio_test_namespace }}"
+              - --filename
+              - "{{ istio_routing_policy_manifest_remote_path }}"
+          environment:
+            KUBECONFIG: "{{ kubeconfig_path }}"
+          changed_when: false
+
+    - name: Get routing demo pods
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pods
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --selector
+          - app={{ istio_routing_app }}
+          - --output=wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_canary_pods
+      changed_when: false
+
+    - name: Get restored VirtualService
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - virtualservice
+          - "{{ istio_routing_service }}"
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --output=yaml
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_canary_restored_virtualservice
+      changed_when: false
+
+    - name: Show 100 0 result
+      ansible.builtin.debug:
+        msg: "{{ istio_canary_100_0.stdout_lines }}"
+
+    - name: Show 90 10 result
+      ansible.builtin.debug:
+        msg: "{{ istio_canary_90_10.stdout_lines }}"
+
+    - name: Show 50 50 result
+      ansible.builtin.debug:
+        msg: "{{ istio_canary_50_50.stdout_lines }}"
+
+    - name: Show 0 100 result
+      ansible.builtin.debug:
+        msg: "{{ istio_canary_0_100.stdout_lines }}"
+
+    - name: Show routing demo pods
+      ansible.builtin.debug:
+        msg: "{{ istio_canary_pods.stdout_lines }}"

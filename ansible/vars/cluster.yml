@@ -497,3 +497,9 @@ istio_resilience_policy_manifest_remote_path: /tmp/istio-resilience-policy.yml
 
 istio_circuit_breaker_policy_manifest_local_path: files/istio-circuit-breaker-policy.yml
 istio_circuit_breaker_policy_manifest_remote_path: /tmp/istio-circuit-breaker-policy.yml
+
+# Istio Canary Traffic Test
+istio_canary_virtualservice_template_local_path: templates/istio-canary-virtualservice.yml.j2
+istio_canary_virtualservice_remote_path: /tmp/istio-canary-virtualservice.yml
+
+istio_canary_request_count: 200
