@@ -43,7 +43,7 @@
 
 - name: Install Istio ingress gateway
   ansible.builtin.import_playbook: istio-ingress.yml
-  
+
 - name: Install Kubernetes monitoring stack
   ansible.builtin.import_playbook: monitoring.yml
 
@@ -52,7 +52,10 @@
 
 - name: Install Thanos Query
   ansible.builtin.import_playbook: thanos-query.yml
-
+  
+- name: Configure Istio service mesh observability
+  ansible.builtin.import_playbook: istio-observability.yml
+  
 - name: Install Thanos Compactor
   ansible.builtin.import_playbook: thanos-compactor.yml
 

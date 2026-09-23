@@ -562,3 +562,24 @@ istio_gateway_api_gateway_manifest_remote_path: /tmp/istio-gateway-api-gateway.y
 
 istio_gateway_api_route_manifest_local_path: files/istio-gateway-api-route.yml
 istio_gateway_api_route_manifest_remote_path: /tmp/istio-gateway-api-route.yml
+
+# Istio Observability
+istio_observability_workload_podmonitor_name: istio-workloads
+istio_observability_gateway_podmonitor_name: istio-gateways
+istio_observability_istiod_servicemonitor_name: istiod
+
+istio_observability_monitors_local_path: templates/istio-observability-monitors.yml.j2
+istio_observability_monitors_remote_path: /tmp/istio-observability-monitors.yml
+
+istio_observability_dashboard_name: istio-service-mesh-dashboard
+
+istio_observability_dashboard_local_path: templates/istio-service-mesh-dashboard-configmap.yml.j2
+istio_observability_dashboard_remote_path: /tmp/istio-service-mesh-dashboard-configmap.yml
+
+istio_observability_scrape_timeout: 10s
+
+istio_observability_test_default_requests: 50
+istio_observability_test_v2_requests: 30
+istio_observability_test_ingress_requests: 30
+
+istio_observability_scrape_wait_seconds: 40

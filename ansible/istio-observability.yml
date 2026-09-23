@@ -1,0 +1,240 @@
+---
+- name: Configure Istio service mesh observability
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  tasks:
+    - name: Check Kubernetes administrator kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: istio_observability_kubeconfig
+
+    - name: Verify Kubernetes administrator kubeconfig
+      ansible.builtin.assert:
+        that:
+          - istio_observability_kubeconfig.stat.exists
+        fail_msg: >-
+          Kubernetes administrator kubeconfig was not found at
+          {{ kubeconfig_path }}.
+
+    - name: Verify Istiod is available
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - wait
+          - --for=condition=Available
+          - deployment/istiod
+          - --namespace
+          - "{{ istio_namespace }}"
+          - --timeout=180s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Verify Prometheus Operator is available
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment/kube-prometheus-stack-operator
+          - --namespace
+          - "{{ monitoring_namespace }}"
+          - --timeout=180s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Verify Grafana is available
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment/kube-prometheus-stack-grafana
+          - --namespace
+          - "{{ monitoring_namespace }}"
+          - --timeout=180s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Verify monitoring CRDs
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - crd
+          - "{{ item }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      loop:
+        - podmonitors.monitoring.coreos.com
+        - servicemonitors.monitoring.coreos.com
+      changed_when: false
+
+    - name: Render Istio observability monitors
+      ansible.builtin.template:
+        src: "{{ istio_observability_monitors_local_path }}"
+        dest: "{{ istio_observability_monitors_remote_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Validate Istio observability monitors
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - --dry-run=server
+          - --filename
+          - "{{ istio_observability_monitors_remote_path }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Apply Istio observability monitors
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - --filename
+          - "{{ istio_observability_monitors_remote_path }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_observability_monitors_apply
+      changed_when: >-
+        'created' in istio_observability_monitors_apply.stdout or
+        'configured' in istio_observability_monitors_apply.stdout
+
+    - name: Render Istio Grafana dashboard
+      ansible.builtin.template:
+        src: "{{ istio_observability_dashboard_local_path }}"
+        dest: "{{ istio_observability_dashboard_remote_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Validate Istio Grafana dashboard manifest
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - --dry-run=server
+          - --filename
+          - "{{ istio_observability_dashboard_remote_path }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Apply Istio Grafana dashboard
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - --filename
+          - "{{ istio_observability_dashboard_remote_path }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_observability_dashboard_apply
+      changed_when: >-
+        'created' in istio_observability_dashboard_apply.stdout or
+        'configured' in istio_observability_dashboard_apply.stdout
+
+    - name: Verify Istio workload exposes Envoy Prometheus port
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        POD="$(
+          kubectl get pods \
+            --namespace {{ istio_test_namespace }} \
+            --selector app=istio-routing-demo \
+            --output=jsonpath='{.items[0].metadata.name}'
+        )"
+
+        if [ -z "${POD}" ]; then
+          echo "Istio routing demo pod was not found."
+          exit 1
+        fi
+
+        PORTS="$(
+          kubectl get pod "${POD}" \
+            --namespace {{ istio_test_namespace }} \
+            --output=jsonpath='{range .spec.initContainers[*].ports[*]}{.name}:{.containerPort}{"\n"}{end}{range .spec.containers[*].ports[*]}{.name}:{.containerPort}{"\n"}{end}'
+        )"
+
+        echo "${PORTS}"
+
+        if ! grep -qx 'http-envoy-prom:15090' <<< "${PORTS}"; then
+          echo "Envoy Prometheus port was not found."
+          exit 1
+        fi
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Get Istio PodMonitors
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - podmonitor
+          - --namespace
+          - "{{ monitoring_namespace }}"
+          - --output=wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_observability_podmonitors
+      changed_when: false
+
+    - name: Get Istio ServiceMonitor
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - servicemonitor
+          - "{{ istio_observability_istiod_servicemonitor_name }}"
+          - --namespace
+          - "{{ monitoring_namespace }}"
+          - --output=wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_observability_servicemonitor
+      changed_when: false
+
+    - name: Get Istio Grafana dashboard ConfigMap
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - configmap
+          - "{{ istio_observability_dashboard_name }}"
+          - --namespace
+          - "{{ monitoring_namespace }}"
+          - --show-labels
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_observability_dashboard
+      changed_when: false
+
+    - name: Wait for Grafana dashboard sidecar discovery
+      ansible.builtin.pause:
+        seconds: 10
+
+    - name: Show Istio PodMonitors
+      ansible.builtin.debug:
+        msg: "{{ istio_observability_podmonitors.stdout_lines }}"
+
+    - name: Show Istio ServiceMonitor
+      ansible.builtin.debug:
+        msg: "{{ istio_observability_servicemonitor.stdout_lines }}"
+
+    - name: Show Istio Grafana dashboard
+      ansible.builtin.debug:
+        msg: "{{ istio_observability_dashboard.stdout_lines }}"

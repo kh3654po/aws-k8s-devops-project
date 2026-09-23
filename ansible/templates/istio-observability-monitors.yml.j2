@@ -1,0 +1,73 @@
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+
+metadata:
+  name: "{{ istio_observability_workload_podmonitor_name }}"
+  namespace: "{{ monitoring_namespace }}"
+
+  labels:
+    release: "{{ kube_prometheus_stack_release_name }}"
+
+spec:
+  namespaceSelector:
+    matchNames:
+      - "{{ istio_test_namespace }}"
+
+  selector: {}
+
+  podMetricsEndpoints:
+    - port: http-envoy-prom
+      path: /stats/prometheus
+      interval: "{{ prometheus_scrape_interval }}"
+      scrapeTimeout: "{{ istio_observability_scrape_timeout }}"
+
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+
+metadata:
+  name: "{{ istio_observability_gateway_podmonitor_name }}"
+  namespace: "{{ monitoring_namespace }}"
+
+  labels:
+    release: "{{ kube_prometheus_stack_release_name }}"
+
+spec:
+  namespaceSelector:
+    matchNames:
+      - "{{ istio_ingress_namespace }}"
+
+  selector: {}
+
+  podMetricsEndpoints:
+    - port: http-envoy-prom
+      path: /stats/prometheus
+      interval: "{{ prometheus_scrape_interval }}"
+      scrapeTimeout: "{{ istio_observability_scrape_timeout }}"
+
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+
+metadata:
+  name: "{{ istio_observability_istiod_servicemonitor_name }}"
+  namespace: "{{ monitoring_namespace }}"
+
+  labels:
+    release: "{{ kube_prometheus_stack_release_name }}"
+
+spec:
+  namespaceSelector:
+    matchNames:
+      - "{{ istio_namespace }}"
+
+  selector:
+    matchLabels:
+      app: istiod
+
+  endpoints:
+    - port: http-monitoring
+      path: /metrics
+      interval: "{{ prometheus_scrape_interval }}"
+      scrapeTimeout: "{{ istio_observability_scrape_timeout }}"

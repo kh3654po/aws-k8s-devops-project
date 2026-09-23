@@ -1,0 +1,431 @@
+---
+- name: Validate Istio service mesh observability
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  tasks:
+    - name: Check Kubernetes administrator kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: istio_observability_test_kubeconfig
+
+    - name: Verify Kubernetes administrator kubeconfig
+      ansible.builtin.assert:
+        that:
+          - istio_observability_test_kubeconfig.stat.exists
+        fail_msg: >-
+          Kubernetes administrator kubeconfig was not found at
+          {{ kubeconfig_path }}.
+
+    - name: Verify Istio client
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment/{{ istio_test_client_app }}
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --timeout=180s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Verify Istio routing v1
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment/{{ istio_routing_app }}-v1
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --timeout=180s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Verify Istio routing v2
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment/{{ istio_routing_app }}-v2
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --timeout=180s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Verify Prometheus is available
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - prometheus
+          - --namespace
+          - "{{ monitoring_namespace }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Generate default v1 mesh traffic
+      ansible.builtin.shell: |
+        set -e
+
+        kubectl exec \
+          --namespace {{ istio_test_namespace }} \
+          deployment/{{ istio_test_client_app }} \
+          --container {{ istio_test_client_app }} \
+          -- sh -c '
+            set -e
+
+            COUNT=1
+
+            while [ "${COUNT}" -le {{ istio_observability_test_default_requests }} ]; do
+              curl \
+                --silent \
+                --show-error \
+                --fail \
+                --max-time 5 \
+                http://{{ istio_routing_service }}/ \
+                >/dev/null
+
+              COUNT=$((COUNT + 1))
+            done
+          '
+
+        echo "v1_requests={{ istio_observability_test_default_requests }}"
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_observability_v1_traffic
+      changed_when: false
+
+    - name: Generate header based v2 mesh traffic
+      ansible.builtin.shell: |
+        set -e
+
+        kubectl exec \
+          --namespace {{ istio_test_namespace }} \
+          deployment/{{ istio_test_client_app }} \
+          --container {{ istio_test_client_app }} \
+          -- sh -c '
+            set -e
+
+            COUNT=1
+
+            while [ "${COUNT}" -le {{ istio_observability_test_v2_requests }} ]; do
+              curl \
+                --silent \
+                --show-error \
+                --fail \
+                --max-time 5 \
+                --header "x-version: v2" \
+                http://{{ istio_routing_service }}/ \
+                >/dev/null
+
+              COUNT=$((COUNT + 1))
+            done
+          '
+
+        echo "v2_requests={{ istio_observability_test_v2_requests }}"
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_observability_v2_traffic
+      changed_when: false
+
+    - name: Generate Istio ingress gateway traffic
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        GATEWAY_POD="$(
+          kubectl get pods \
+            --namespace {{ istio_ingress_namespace }} \
+            --selector istio=ingressgateway \
+            --output=jsonpath='{.items[0].metadata.name}'
+        )"
+
+        if [ -z "${GATEWAY_POD}" ]; then
+          echo "Istio ingress gateway pod was not found."
+          exit 1
+        fi
+
+        GATEWAY_NODE="$(
+          kubectl get pod "${GATEWAY_POD}" \
+            --namespace {{ istio_ingress_namespace }} \
+            --output=jsonpath='{.spec.nodeName}'
+        )"
+
+        GATEWAY_NODE_IP="$(
+          kubectl get node "${GATEWAY_NODE}" \
+            --output=jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}'
+        )"
+
+        HTTP_NODE_PORT="$(
+          kubectl get service \
+            {{ istio_ingress_gateway_release_name }} \
+            --namespace {{ istio_ingress_namespace }} \
+            --output=jsonpath='{.spec.ports[?(@.name=="http2")].nodePort}'
+        )"
+
+        COUNT=1
+
+        while [ "${COUNT}" -le {{ istio_observability_test_ingress_requests }} ]; do
+          STATUS="$(
+            curl \
+              --silent \
+              --show-error \
+              --max-time 5 \
+              --header 'Host: {{ istio_ingress_test_host }}' \
+              --output /dev/null \
+              --write-out '%{http_code}' \
+              "http://${GATEWAY_NODE_IP}:${HTTP_NODE_PORT}/ingress" \
+              || true
+          )"
+
+          if [ "${STATUS}" != "200" ]; then
+            echo "Ingress request failed with status ${STATUS}."
+            exit 1
+          fi
+
+          COUNT=$((COUNT + 1))
+        done
+
+        echo "ingress_requests={{ istio_observability_test_ingress_requests }}"
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_observability_ingress_traffic
+      changed_when: false
+
+    - name: Wait for Prometheus scrape interval
+      ansible.builtin.pause:
+        seconds: "{{ istio_observability_scrape_wait_seconds }}"
+
+    - name: Get Prometheus service ClusterIP
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - service
+          - kube-prometheus-stack-prometheus
+          - --namespace
+          - "{{ monitoring_namespace }}"
+          - --output=jsonpath={.spec.clusterIP}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_observability_prometheus_ip
+      changed_when: false
+
+    - name: Query Istio request metrics from Prometheus
+      ansible.builtin.uri:
+        url: >-
+          http://{{ istio_observability_prometheus_ip.stdout }}:9090/api/v1/query
+        method: POST
+        body_format: form-urlencoded
+        body:
+          query: >-
+            sum(
+              istio_requests_total{
+                reporter="destination",
+                destination_workload_namespace="{{ istio_test_namespace }}"
+              }
+            )
+        return_content: true
+        status_code: 200
+      register: istio_observability_request_query
+      changed_when: false
+
+    - name: Verify Istio request metrics exist
+      ansible.builtin.assert:
+        that:
+          - istio_observability_request_query.json.status == "success"
+          - istio_observability_request_query.json.data.result | length > 0
+        fail_msg: >-
+          Prometheus did not return Istio request metrics.
+
+    - name: Query routing version metrics from Prometheus
+      ansible.builtin.uri:
+        url: >-
+          http://{{ istio_observability_prometheus_ip.stdout }}:9090/api/v1/query
+        method: POST
+        body_format: form-urlencoded
+        body:
+          query: >-
+            sum(
+              istio_requests_total{
+                reporter="destination",
+                destination_service_name="{{ istio_routing_service }}",
+                destination_service_namespace="{{ istio_test_namespace }}"
+              }
+            )
+            by (
+              destination_version
+            )
+        return_content: true
+        status_code: 200
+      register: istio_observability_version_query
+      changed_when: false
+
+    - name: Extract observed destination versions
+      ansible.builtin.set_fact:
+        istio_observability_versions: >-
+          {{
+            istio_observability_version_query.json.data.result
+            | map(attribute='metric')
+            | map(attribute='destination_version')
+            | list
+          }}
+
+    - name: Verify v1 and v2 traffic metrics exist
+      ansible.builtin.assert:
+        that:
+          - "'v1' in istio_observability_versions"
+          - "'v2' in istio_observability_versions"
+        fail_msg: >-
+          Istio request metrics did not contain both v1 and v2.
+          Observed versions: {{ istio_observability_versions }}
+
+    - name: Query mutual TLS metrics from Prometheus
+      ansible.builtin.uri:
+        url: >-
+          http://{{ istio_observability_prometheus_ip.stdout }}:9090/api/v1/query
+        method: POST
+        body_format: form-urlencoded
+        body:
+          query: >-
+            sum(
+              istio_requests_total{
+                reporter="destination",
+                destination_workload_namespace="{{ istio_test_namespace }}",
+                connection_security_policy="mutual_tls"
+              }
+            )
+        return_content: true
+        status_code: 200
+      register: istio_observability_mtls_query
+      changed_when: false
+
+    - name: Verify mutual TLS metrics exist
+      ansible.builtin.assert:
+        that:
+          - istio_observability_mtls_query.json.status == "success"
+          - istio_observability_mtls_query.json.data.result | length > 0
+        fail_msg: >-
+          Prometheus did not return Istio mutual TLS metrics.
+
+    - name: Query P95 request duration from Prometheus
+      ansible.builtin.uri:
+        url: >-
+          http://{{ istio_observability_prometheus_ip.stdout }}:9090/api/v1/query
+        method: POST
+        body_format: form-urlencoded
+        body:
+          query: >-
+            histogram_quantile(
+              0.95,
+              sum(
+                rate(
+                  istio_request_duration_milliseconds_bucket{
+                    reporter="destination",
+                    destination_workload_namespace="{{ istio_test_namespace }}"
+                  }[5m]
+                )
+              )
+              by (
+                le,
+                destination_workload
+              )
+            )
+        return_content: true
+        status_code: 200
+      register: istio_observability_latency_query
+      changed_when: false
+
+    - name: Verify latency metrics exist
+      ansible.builtin.assert:
+        that:
+          - istio_observability_latency_query.json.status == "success"
+          - istio_observability_latency_query.json.data.result | length > 0
+        fail_msg: >-
+          Prometheus did not return Istio request duration metrics.
+
+    - name: Get Thanos Query service ClusterIP
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - service
+          - "{{ thanos_query_service_name }}"
+          - --namespace
+          - "{{ monitoring_namespace }}"
+          - --output=jsonpath={.spec.clusterIP}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_observability_thanos_query_ip
+      changed_when: false
+
+    - name: Query Istio metrics through Thanos Query
+      ansible.builtin.uri:
+        url: >-
+          http://{{ istio_observability_thanos_query_ip.stdout }}:{{ thanos_query_http_port }}/api/v1/query
+        method: POST
+        body_format: form-urlencoded
+        body:
+          query: >-
+            sum(
+              istio_requests_total{
+                reporter="destination",
+                destination_workload_namespace="{{ istio_test_namespace }}"
+              }
+            )
+        return_content: true
+        status_code: 200
+      register: istio_observability_thanos_query
+      changed_when: false
+
+    - name: Verify Thanos Query returns Istio metrics
+      ansible.builtin.assert:
+        that:
+          - istio_observability_thanos_query.json.status == "success"
+          - istio_observability_thanos_query.json.data.result | length > 0
+        fail_msg: >-
+          Thanos Query did not return Istio metrics.
+
+    - name: Show generated mesh traffic
+      ansible.builtin.debug:
+        msg:
+          - "{{ istio_observability_v1_traffic.stdout_lines }}"
+          - "{{ istio_observability_v2_traffic.stdout_lines }}"
+          - "{{ istio_observability_ingress_traffic.stdout_lines }}"
+
+    - name: Show observed destination versions
+      ansible.builtin.debug:
+        msg: "destination_versions={{ istio_observability_versions }}"
+
+    - name: Show Prometheus Istio request query
+      ansible.builtin.debug:
+        msg: "{{ istio_observability_request_query.json.data.result }}"
+
+    - name: Show Prometheus mTLS query
+      ansible.builtin.debug:
+        msg: "{{ istio_observability_mtls_query.json.data.result }}"
+
+    - name: Show Prometheus latency query
+      ansible.builtin.debug:
+        msg: "{{ istio_observability_latency_query.json.data.result }}"
+
+    - name: Show Thanos Istio query
+      ansible.builtin.debug:
+        msg: "{{ istio_observability_thanos_query.json.data.result }}"
