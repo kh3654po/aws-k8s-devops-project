@@ -1,0 +1,33 @@
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+
+metadata:
+  name: istio-ingress-demo
+
+spec:
+  hosts:
+    - ingress-demo.local
+
+  exportTo:
+    - istio-ingress
+
+  gateways:
+    - istio-ingress/istio-ingress-demo-gateway
+
+  http:
+    - name: ingress-demo-route
+
+      match:
+        - uri:
+            prefix: /ingress
+
+      rewrite:
+        uri: /
+
+      route:
+        - destination:
+            host: istio-ingress-demo.istio-test.svc.cluster.local
+
+            port:
+              number: 80

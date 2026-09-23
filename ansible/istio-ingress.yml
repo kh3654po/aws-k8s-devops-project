@@ -1,0 +1,252 @@
+---
+- name: Install Istio Ingress Gateway
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  tasks:
+    - name: Check Kubernetes administrator kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: istio_ingress_kubeconfig
+
+    - name: Verify Kubernetes administrator kubeconfig
+      ansible.builtin.assert:
+        that:
+          - istio_ingress_kubeconfig.stat.exists
+        fail_msg: >-
+          Kubernetes administrator kubeconfig was not found at
+          {{ kubeconfig_path }}.
+
+    - name: Check Helm version
+      ansible.builtin.command:
+        argv:
+          - "{{ helm_binary_path }}"
+          - version
+          - --short
+      register: istio_ingress_helm_version
+      changed_when: false
+
+    - name: Verify Istiod is available
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - wait
+          - --for=condition=Available
+          - deployment/istiod
+          - --namespace
+          - "{{ istio_namespace }}"
+          - --timeout=180s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Check Istio ingress namespace
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - namespace
+          - "{{ istio_ingress_namespace }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_ingress_namespace_check
+      failed_when: false
+      changed_when: false
+
+    - name: Create Istio ingress namespace
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - create
+          - namespace
+          - "{{ istio_ingress_namespace }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      when: istio_ingress_namespace_check.rc != 0
+
+    - name: Configure Istio Helm repository
+      ansible.builtin.command:
+        argv:
+          - "{{ helm_binary_path }}"
+          - repo
+          - add
+          - "{{ istio_repository_name }}"
+          - "{{ istio_repository_url }}"
+          - --force-update
+      changed_when: false
+
+    - name: Update Istio Helm repository
+      ansible.builtin.command:
+        argv:
+          - "{{ helm_binary_path }}"
+          - repo
+          - update
+          - "{{ istio_repository_name }}"
+      changed_when: false
+
+    - name: Verify Istio gateway chart version
+      ansible.builtin.command:
+        argv:
+          - "{{ helm_binary_path }}"
+          - show
+          - chart
+          - "{{ istio_ingress_gateway_chart }}"
+          - --version
+          - "{{ istio_version }}"
+      register: istio_ingress_chart_metadata
+      changed_when: false
+
+    - name: Assert Istio gateway chart version
+      ansible.builtin.assert:
+        that:
+          - >-
+            ('version: ' ~ istio_version)
+            in istio_ingress_chart_metadata.stdout
+        fail_msg: >-
+          Istio gateway chart version {{ istio_version }}
+          was not found.
+
+    - name: Render Istio ingress gateway values
+      ansible.builtin.template:
+        src: "{{ istio_ingress_gateway_values_local_path }}"
+        dest: "{{ istio_ingress_gateway_values_remote_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Validate Istio ingress gateway Helm rendering
+      ansible.builtin.command:
+        argv:
+          - "{{ helm_binary_path }}"
+          - template
+          - "{{ istio_ingress_gateway_release_name }}"
+          - "{{ istio_ingress_gateway_chart }}"
+          - --namespace
+          - "{{ istio_ingress_namespace }}"
+          - --version
+          - "{{ istio_version }}"
+          - --values
+          - "{{ istio_ingress_gateway_values_remote_path }}"
+      register: istio_ingress_helm_template
+      changed_when: false
+
+    - name: Install or upgrade Istio ingress gateway
+      ansible.builtin.command:
+        argv:
+          - "{{ helm_binary_path }}"
+          - upgrade
+          - --install
+          - "{{ istio_ingress_gateway_release_name }}"
+          - "{{ istio_ingress_gateway_chart }}"
+          - --namespace
+          - "{{ istio_ingress_namespace }}"
+          - --version
+          - "{{ istio_version }}"
+          - --values
+          - "{{ istio_ingress_gateway_values_remote_path }}"
+          - --wait
+          - --timeout
+          - 5m
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_ingress_helm_install
+      changed_when: >-
+        'STATUS: deployed' in istio_ingress_helm_install.stdout or
+        'STATUS: upgraded' in istio_ingress_helm_install.stdout
+
+    - name: Wait for Istio ingress gateway deployment
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment/{{ istio_ingress_gateway_release_name }}
+          - --namespace
+          - "{{ istio_ingress_namespace }}"
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Get Istio ingress gateway Service type
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - service
+          - "{{ istio_ingress_gateway_release_name }}"
+          - --namespace
+          - "{{ istio_ingress_namespace }}"
+          - --output=jsonpath={.spec.type}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_ingress_service_type
+      changed_when: false
+
+    - name: Verify Istio ingress gateway Service type
+      ansible.builtin.assert:
+        that:
+          - istio_ingress_service_type.stdout == "NodePort"
+        fail_msg: >-
+          Istio ingress gateway Service type is not NodePort.
+
+    - name: Get Istio ingress gateway selector label
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - deployment
+          - "{{ istio_ingress_gateway_release_name }}"
+          - --namespace
+          - "{{ istio_ingress_namespace }}"
+          - --output=jsonpath={.spec.template.metadata.labels.istio}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_ingress_selector_label
+      changed_when: false
+
+    - name: Verify Istio ingress gateway selector label
+      ansible.builtin.assert:
+        that:
+          - istio_ingress_selector_label.stdout == "ingressgateway"
+        fail_msg: >-
+          Expected label istio=ingressgateway was not found.
+
+    - name: Get Istio ingress gateway resources
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pod,service
+          - --namespace
+          - "{{ istio_ingress_namespace }}"
+          - --output=wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_ingress_runtime
+      changed_when: false
+
+    - name: Get Istio ingress gateway Helm status
+      ansible.builtin.command:
+        argv:
+          - "{{ helm_binary_path }}"
+          - status
+          - "{{ istio_ingress_gateway_release_name }}"
+          - --namespace
+          - "{{ istio_ingress_namespace }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_ingress_helm_status
+      changed_when: false
+
+    - name: Show Istio ingress gateway resources
+      ansible.builtin.debug:
+        msg: "{{ istio_ingress_runtime.stdout_lines }}"
+
+    - name: Show Istio ingress gateway Helm status
+      ansible.builtin.debug:
+        msg: "{{ istio_ingress_helm_status.stdout_lines }}"

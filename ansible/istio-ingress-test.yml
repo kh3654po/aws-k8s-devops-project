@@ -1,0 +1,456 @@
+---
+- name: Verify Istio Ingress Gateway routing
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  tasks:
+    - name: Check Kubernetes administrator kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: istio_ingress_test_kubeconfig
+
+    - name: Verify Kubernetes administrator kubeconfig
+      ansible.builtin.assert:
+        that:
+          - istio_ingress_test_kubeconfig.stat.exists
+        fail_msg: >-
+          Kubernetes administrator kubeconfig was not found at
+          {{ kubeconfig_path }}.
+
+    - name: Verify Istio ingress gateway is available
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment/{{ istio_ingress_gateway_release_name }}
+          - --namespace
+          - "{{ istio_ingress_namespace }}"
+          - --timeout=180s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Verify Istio test namespace injection label
+      ansible.builtin.shell: |
+        INJECTION="$(
+          kubectl get namespace {{ istio_test_namespace }} \
+            --output=jsonpath='{.metadata.labels.istio-injection}'
+        )"
+
+        echo "istio-injection=${INJECTION}"
+
+        test "${INJECTION}" = "enabled"
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Copy ingress demo manifest
+      ansible.builtin.copy:
+        src: "{{ istio_ingress_demo_manifest_local_path }}"
+        dest: "{{ istio_ingress_demo_manifest_remote_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Copy Istio Gateway manifest
+      ansible.builtin.copy:
+        src: "{{ istio_ingress_gateway_manifest_local_path }}"
+        dest: "{{ istio_ingress_gateway_manifest_remote_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Copy Istio VirtualService manifest
+      ansible.builtin.copy:
+        src: "{{ istio_ingress_virtualservice_manifest_local_path }}"
+        dest: "{{ istio_ingress_virtualservice_manifest_remote_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Validate ingress demo manifest
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - --dry-run=server
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --filename
+          - "{{ istio_ingress_demo_manifest_remote_path }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Apply ingress demo application
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --filename
+          - "{{ istio_ingress_demo_manifest_remote_path }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_ingress_demo_apply
+      changed_when: >-
+        'created' in istio_ingress_demo_apply.stdout or
+        'configured' in istio_ingress_demo_apply.stdout
+
+    - name: Wait for ingress demo deployment
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment/{{ istio_ingress_test_app }}
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Verify ingress demo contains istio-proxy
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        POD="$(
+          kubectl get pods \
+            --namespace {{ istio_test_namespace }} \
+            --selector app={{ istio_ingress_test_app }} \
+            --output=jsonpath='{.items[0].metadata.name}'
+        )"
+
+        if [ -z "${POD}" ]; then
+          echo "Ingress demo pod was not found."
+          exit 1
+        fi
+
+        CONTAINERS="$(
+          kubectl get pod "${POD}" \
+            --namespace {{ istio_test_namespace }} \
+            --output=jsonpath='{.spec.containers[*].name}'
+        )"
+
+        INIT_CONTAINERS="$(
+          kubectl get pod "${POD}" \
+            --namespace {{ istio_test_namespace }} \
+            --output=jsonpath='{.spec.initContainers[*].name}'
+        )"
+
+        echo "pod=${POD}"
+        echo "containers=${CONTAINERS}"
+        echo "initContainers=${INIT_CONTAINERS}"
+
+        if ! printf '%s\n%s\n' \
+          "${CONTAINERS}" \
+          "${INIT_CONTAINERS}" |
+          tr ' ' '\n' |
+          grep -qx 'istio-proxy'; then
+
+          echo "istio-proxy was not found."
+          exit 1
+        fi
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Validate Istio Gateway manifest
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - --dry-run=server
+          - --namespace
+          - "{{ istio_ingress_namespace }}"
+          - --filename
+          - "{{ istio_ingress_gateway_manifest_remote_path }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Apply Istio Gateway
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - --namespace
+          - "{{ istio_ingress_namespace }}"
+          - --filename
+          - "{{ istio_ingress_gateway_manifest_remote_path }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_gateway_apply
+      changed_when: >-
+        'created' in istio_gateway_apply.stdout or
+        'configured' in istio_gateway_apply.stdout
+
+    - name: Validate Istio VirtualService manifest
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - --dry-run=server
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --filename
+          - "{{ istio_ingress_virtualservice_manifest_remote_path }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Apply Istio VirtualService
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --filename
+          - "{{ istio_ingress_virtualservice_manifest_remote_path }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_ingress_virtualservice_apply
+      changed_when: >-
+        'created' in istio_ingress_virtualservice_apply.stdout or
+        'configured' in istio_ingress_virtualservice_apply.stdout
+
+    - name: Discover Istio ingress NodePort endpoint
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        GATEWAY_POD="$(
+          kubectl get pods \
+            --namespace {{ istio_ingress_namespace }} \
+            --selector istio=ingressgateway \
+            --output=jsonpath='{.items[0].metadata.name}'
+        )"
+
+        if [ -z "${GATEWAY_POD}" ]; then
+          echo "Istio ingress gateway pod was not found."
+          exit 1
+        fi
+
+        GATEWAY_NODE="$(
+          kubectl get pod "${GATEWAY_POD}" \
+            --namespace {{ istio_ingress_namespace }} \
+            --output=jsonpath='{.spec.nodeName}'
+        )"
+
+        GATEWAY_NODE_IP="$(
+          kubectl get node "${GATEWAY_NODE}" \
+            --output=jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}'
+        )"
+
+        HTTP_NODE_PORT="$(
+          kubectl get service \
+            {{ istio_ingress_gateway_release_name }} \
+            --namespace {{ istio_ingress_namespace }} \
+            --output=jsonpath='{.spec.ports[?(@.name=="http2")].nodePort}'
+        )"
+
+        if [ -z "${GATEWAY_NODE_IP}" ]; then
+          echo "Gateway node InternalIP was not found."
+          exit 1
+        fi
+
+        if [ -z "${HTTP_NODE_PORT}" ]; then
+          echo "Gateway HTTP NodePort was not found."
+          exit 1
+        fi
+
+        echo "gateway_pod=${GATEWAY_POD}"
+        echo "gateway_node=${GATEWAY_NODE}"
+        echo "gateway_node_ip=${GATEWAY_NODE_IP}"
+        echo "http_node_port=${HTTP_NODE_PORT}"
+        echo "endpoint=http://${GATEWAY_NODE_IP}:${HTTP_NODE_PORT}"
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_ingress_endpoint
+      changed_when: false
+
+    - name: Verify valid ingress request
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        GATEWAY_POD="$(
+          kubectl get pods \
+            --namespace {{ istio_ingress_namespace }} \
+            --selector istio=ingressgateway \
+            --output=jsonpath='{.items[0].metadata.name}'
+        )"
+
+        GATEWAY_NODE="$(
+          kubectl get pod "${GATEWAY_POD}" \
+            --namespace {{ istio_ingress_namespace }} \
+            --output=jsonpath='{.spec.nodeName}'
+        )"
+
+        GATEWAY_NODE_IP="$(
+          kubectl get node "${GATEWAY_NODE}" \
+            --output=jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}'
+        )"
+
+        HTTP_NODE_PORT="$(
+          kubectl get service \
+            {{ istio_ingress_gateway_release_name }} \
+            --namespace {{ istio_ingress_namespace }} \
+            --output=jsonpath='{.spec.ports[?(@.name=="http2")].nodePort}'
+        )"
+
+        RESPONSE_FILE="/tmp/istio-ingress-response.txt"
+        rm -f "${RESPONSE_FILE}"
+
+        STATUS="$(
+          curl \
+            --silent \
+            --show-error \
+            --max-time 5 \
+            --header 'Host: {{ istio_ingress_test_host }}' \
+            --output "${RESPONSE_FILE}" \
+            --write-out '%{http_code}' \
+            "http://${GATEWAY_NODE_IP}:${HTTP_NODE_PORT}/ingress" \
+            || true
+        )"
+
+        BODY="$(
+          cat "${RESPONSE_FILE}" 2>/dev/null || true
+        )"
+
+        rm -f "${RESPONSE_FILE}"
+
+        echo "status=${STATUS}"
+        echo "body=${BODY}"
+
+        if [ "${STATUS}" != "200" ]; then
+          exit 1
+        fi
+
+        if ! grep -qx 'ingress-gateway-ok' <<< "${BODY}"; then
+          echo "Unexpected response body."
+          exit 1
+        fi
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_ingress_valid_request
+      retries: 15
+      delay: 2
+      until: istio_ingress_valid_request.rc == 0
+      changed_when: false
+
+    - name: Verify unmatched Host is rejected by routing
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        GATEWAY_POD="$(
+          kubectl get pods \
+            --namespace {{ istio_ingress_namespace }} \
+            --selector istio=ingressgateway \
+            --output=jsonpath='{.items[0].metadata.name}'
+        )"
+
+        GATEWAY_NODE="$(
+          kubectl get pod "${GATEWAY_POD}" \
+            --namespace {{ istio_ingress_namespace }} \
+            --output=jsonpath='{.spec.nodeName}'
+        )"
+
+        GATEWAY_NODE_IP="$(
+          kubectl get node "${GATEWAY_NODE}" \
+            --output=jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}'
+        )"
+
+        HTTP_NODE_PORT="$(
+          kubectl get service \
+            {{ istio_ingress_gateway_release_name }} \
+            --namespace {{ istio_ingress_namespace }} \
+            --output=jsonpath='{.spec.ports[?(@.name=="http2")].nodePort}'
+        )"
+
+        STATUS="$(
+          curl \
+            --silent \
+            --show-error \
+            --max-time 5 \
+            --header 'Host: invalid.local' \
+            --output /dev/null \
+            --write-out '%{http_code}' \
+            "http://${GATEWAY_NODE_IP}:${HTTP_NODE_PORT}/ingress" \
+            || true
+        )"
+
+        echo "invalid_host_status=${STATUS}"
+
+        test "${STATUS}" = "404"
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_ingress_invalid_host
+      retries: 15
+      delay: 2
+      until: istio_ingress_invalid_host.rc == 0
+      changed_when: false
+
+    - name: Get Istio Gateway
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - gateways.networking.istio.io
+          - --namespace
+          - "{{ istio_ingress_namespace }}"
+          - --output=wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_gateway_runtime
+      changed_when: false
+
+    - name: Get Istio VirtualService
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - virtualservices.networking.istio.io
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --output=wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_virtualservice_runtime
+      changed_when: false
+
+    - name: Show ingress endpoint
+      ansible.builtin.debug:
+        msg: "{{ istio_ingress_endpoint.stdout_lines }}"
+
+    - name: Show valid ingress result
+      ansible.builtin.debug:
+        msg: "{{ istio_ingress_valid_request.stdout_lines }}"
+
+    - name: Show invalid Host result
+      ansible.builtin.debug:
+        msg: "{{ istio_ingress_invalid_host.stdout_lines }}"
+
+    - name: Show Istio Gateway
+      ansible.builtin.debug:
+        msg: "{{ istio_gateway_runtime.stdout_lines }}"
+
+    - name: Show Istio VirtualService
+      ansible.builtin.debug:
+        msg: "{{ istio_virtualservice_runtime.stdout_lines }}"

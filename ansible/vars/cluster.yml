@@ -521,3 +521,29 @@ istio_authorization_policy_manifest_remote_path: /tmp/istio-authorization-policy
 
 istio_authorization_default_deny_policy: istio-nginx-default-deny
 istio_authorization_allow_policy: istio-nginx-allow-client
+
+# Istio Ingress Gateway
+istio_ingress_namespace: istio-ingress
+
+istio_ingress_gateway_chart: istio/gateway
+istio_ingress_gateway_release_name: istio-ingressgateway
+
+istio_ingress_gateway_values_local_path: templates/istio-ingress-values.yml.j2
+istio_ingress_gateway_values_remote_path: /tmp/istio-ingress-values.yml
+
+# Istio Ingress Gateway Test
+istio_ingress_test_app: istio-ingress-demo
+istio_ingress_test_service: istio-ingress-demo
+istio_ingress_test_host: ingress-demo.local
+
+istio_ingress_gateway_resource_name: istio-ingress-demo-gateway
+istio_ingress_virtualservice_name: istio-ingress-demo
+
+istio_ingress_demo_manifest_local_path: files/istio-ingress-demo.yml
+istio_ingress_demo_manifest_remote_path: /tmp/istio-ingress-demo.yml
+
+istio_ingress_gateway_manifest_local_path: files/istio-ingress-gateway.yml
+istio_ingress_gateway_manifest_remote_path: /tmp/istio-ingress-gateway.yml
+
+istio_ingress_virtualservice_manifest_local_path: files/istio-ingress-virtualservice.yml
+istio_ingress_virtualservice_manifest_remote_path: /tmp/istio-ingress-virtualservice.yml

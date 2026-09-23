@@ -1,0 +1,23 @@
+---
+revision: default
+
+replicaCount: 1
+
+autoscaling:
+  enabled: false
+
+service:
+  type: NodePort
+
+labels:
+  app: "{{ istio_ingress_gateway_release_name }}"
+  istio: ingressgateway
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+  limits:
+    cpu: 500m
+    memory: 512Mi
