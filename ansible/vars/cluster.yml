@@ -547,3 +547,18 @@ istio_ingress_gateway_manifest_remote_path: /tmp/istio-ingress-gateway.yml
 
 istio_ingress_virtualservice_manifest_local_path: files/istio-ingress-virtualservice.yml
 istio_ingress_virtualservice_manifest_remote_path: /tmp/istio-ingress-virtualservice.yml
+
+# Istio Kubernetes Gateway API Test
+istio_gateway_api_class_name: istio
+
+istio_gateway_api_gateway_name: istio-gateway-api-demo
+istio_gateway_api_route_name: istio-gateway-api-demo
+istio_gateway_api_options_name: istio-gateway-api-options
+
+istio_gateway_api_host: gateway-api-demo.local
+
+istio_gateway_api_gateway_manifest_local_path: files/istio-gateway-api-gateway.yml
+istio_gateway_api_gateway_manifest_remote_path: /tmp/istio-gateway-api-gateway.yml
+
+istio_gateway_api_route_manifest_local_path: files/istio-gateway-api-route.yml
+istio_gateway_api_route_manifest_remote_path: /tmp/istio-gateway-api-route.yml

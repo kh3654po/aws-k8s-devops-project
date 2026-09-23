@@ -1,0 +1,553 @@
+---
+- name: Verify Kubernetes Gateway API with Istio
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  tasks:
+    - name: Check Kubernetes administrator kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: istio_gateway_api_kubeconfig
+
+    - name: Verify Kubernetes administrator kubeconfig
+      ansible.builtin.assert:
+        that:
+          - istio_gateway_api_kubeconfig.stat.exists
+        fail_msg: >-
+          Kubernetes administrator kubeconfig was not found at
+          {{ kubeconfig_path }}.
+
+    - name: Verify Istiod is available
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - wait
+          - --for=condition=Available
+          - deployment/istiod
+          - --namespace
+          - "{{ istio_namespace }}"
+          - --timeout=180s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Verify Kubernetes Gateway API resources
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        for RESOURCE in \
+          gatewayclasses.gateway.networking.k8s.io \
+          gateways.gateway.networking.k8s.io \
+          httproutes.gateway.networking.k8s.io
+        do
+          if ! kubectl api-resources \
+            --api-group=gateway.networking.k8s.io \
+            --output=name |
+            grep -qx "${RESOURCE}"; then
+
+            echo "Gateway API resource was not found: ${RESOURCE}"
+            exit 1
+          fi
+        done
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Get Istio GatewayClass controller
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - gatewayclass
+          - "{{ istio_gateway_api_class_name }}"
+          - --output=jsonpath={.spec.controllerName}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_gateway_api_controller
+      changed_when: false
+
+    - name: Verify Istio GatewayClass controller
+      ansible.builtin.assert:
+        that:
+          - istio_gateway_api_controller.stdout == "istio.io/gateway-controller"
+        fail_msg: >-
+          GatewayClass {{ istio_gateway_api_class_name }}
+          is not controlled by Istio.
+
+    - name: Get Istio GatewayClass Accepted condition
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - gatewayclass
+          - "{{ istio_gateway_api_class_name }}"
+          - --output=jsonpath={.status.conditions[?(@.type=="Accepted")].status}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_gateway_api_class_accepted
+      changed_when: false
+
+    - name: Verify Istio GatewayClass is accepted
+      ansible.builtin.assert:
+        that:
+          - istio_gateway_api_class_accepted.stdout == "True"
+        fail_msg: >-
+          Istio GatewayClass is not Accepted.
+
+    - name: Copy existing ingress demo manifest
+      ansible.builtin.copy:
+        src: "{{ istio_ingress_demo_manifest_local_path }}"
+        dest: "{{ istio_ingress_demo_manifest_remote_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Apply existing ingress demo application
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --filename
+          - "{{ istio_ingress_demo_manifest_remote_path }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_gateway_api_backend_apply
+      changed_when: >-
+        'created' in istio_gateway_api_backend_apply.stdout or
+        'configured' in istio_gateway_api_backend_apply.stdout
+
+    - name: Wait for ingress demo backend
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment/{{ istio_ingress_test_app }}
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Copy Gateway API Gateway manifest
+      ansible.builtin.copy:
+        src: "{{ istio_gateway_api_gateway_manifest_local_path }}"
+        dest: "{{ istio_gateway_api_gateway_manifest_remote_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Copy Gateway API HTTPRoute manifest
+      ansible.builtin.copy:
+        src: "{{ istio_gateway_api_route_manifest_local_path }}"
+        dest: "{{ istio_gateway_api_route_manifest_remote_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Validate Gateway API Gateway manifest
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - --dry-run=server
+          - --namespace
+          - "{{ istio_ingress_namespace }}"
+          - --filename
+          - "{{ istio_gateway_api_gateway_manifest_remote_path }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Apply Gateway API Gateway
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - --namespace
+          - "{{ istio_ingress_namespace }}"
+          - --filename
+          - "{{ istio_gateway_api_gateway_manifest_remote_path }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_gateway_api_gateway_apply
+      changed_when: >-
+        'created' in istio_gateway_api_gateway_apply.stdout or
+        'configured' in istio_gateway_api_gateway_apply.stdout
+
+    - name: Wait for Gateway API Gateway to be Programmed
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - wait
+          - --for=condition=Programmed
+          - gateway/{{ istio_gateway_api_gateway_name }}
+          - --namespace
+          - "{{ istio_ingress_namespace }}"
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Wait for generated Gateway deployment
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment/{{ istio_gateway_api_gateway_name }}-{{ istio_gateway_api_class_name }}
+          - --namespace
+          - "{{ istio_ingress_namespace }}"
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Verify generated Gateway Service type
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - service
+          - "{{ istio_gateway_api_gateway_name }}-{{ istio_gateway_api_class_name }}"
+          - --namespace
+          - "{{ istio_ingress_namespace }}"
+          - --output=jsonpath={.spec.type}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_gateway_api_service_type
+      changed_when: false
+
+    - name: Assert generated Gateway Service is NodePort
+      ansible.builtin.assert:
+        that:
+          - istio_gateway_api_service_type.stdout == "NodePort"
+        fail_msg: >-
+          Generated Istio Gateway API Service is not NodePort.
+
+    - name: Validate Gateway API HTTPRoute manifest
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - --dry-run=server
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --filename
+          - "{{ istio_gateway_api_route_manifest_remote_path }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Apply Gateway API HTTPRoute
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --filename
+          - "{{ istio_gateway_api_route_manifest_remote_path }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_gateway_api_route_apply
+      changed_when: >-
+        'created' in istio_gateway_api_route_apply.stdout or
+        'configured' in istio_gateway_api_route_apply.stdout
+
+    - name: Verify HTTPRoute is accepted
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        ACCEPTED="$(
+          kubectl get httproute \
+            {{ istio_gateway_api_route_name }} \
+            --namespace {{ istio_test_namespace }} \
+            --output=jsonpath='{.status.parents[0].conditions[?(@.type=="Accepted")].status}'
+        )"
+
+        RESOLVED_REFS="$(
+          kubectl get httproute \
+            {{ istio_gateway_api_route_name }} \
+            --namespace {{ istio_test_namespace }} \
+            --output=jsonpath='{.status.parents[0].conditions[?(@.type=="ResolvedRefs")].status}'
+        )"
+
+        echo "accepted=${ACCEPTED}"
+        echo "resolved_refs=${RESOLVED_REFS}"
+
+        test "${ACCEPTED}" = "True"
+        test "${RESOLVED_REFS}" = "True"
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_gateway_api_route_status
+      retries: 15
+      delay: 2
+      until: istio_gateway_api_route_status.rc == 0
+      changed_when: false
+
+    - name: Discover Gateway API NodePort endpoint
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        GATEWAY_POD="$(
+          kubectl get pods \
+            --namespace {{ istio_ingress_namespace }} \
+            --selector gateway.networking.k8s.io/gateway-name={{ istio_gateway_api_gateway_name }} \
+            --output=jsonpath='{.items[0].metadata.name}'
+        )"
+
+        if [ -z "${GATEWAY_POD}" ]; then
+          echo "Gateway API managed pod was not found."
+          exit 1
+        fi
+
+        GATEWAY_NODE="$(
+          kubectl get pod "${GATEWAY_POD}" \
+            --namespace {{ istio_ingress_namespace }} \
+            --output=jsonpath='{.spec.nodeName}'
+        )"
+
+        GATEWAY_NODE_IP="$(
+          kubectl get node "${GATEWAY_NODE}" \
+            --output=jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}'
+        )"
+
+        HTTP_NODE_PORT="$(
+          kubectl get service \
+            {{ istio_gateway_api_gateway_name }}-{{ istio_gateway_api_class_name }} \
+            --namespace {{ istio_ingress_namespace }} \
+            --output=jsonpath='{.spec.ports[?(@.port==80)].nodePort}'
+        )"
+
+        if [ -z "${GATEWAY_NODE_IP}" ]; then
+          echo "Gateway node InternalIP was not found."
+          exit 1
+        fi
+
+        if [ -z "${HTTP_NODE_PORT}" ]; then
+          echo "Gateway HTTP NodePort was not found."
+          exit 1
+        fi
+
+        echo "gateway_pod=${GATEWAY_POD}"
+        echo "gateway_node=${GATEWAY_NODE}"
+        echo "gateway_node_ip=${GATEWAY_NODE_IP}"
+        echo "http_node_port=${HTTP_NODE_PORT}"
+        echo "endpoint=http://${GATEWAY_NODE_IP}:${HTTP_NODE_PORT}"
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_gateway_api_endpoint
+      changed_when: false
+
+    - name: Verify Gateway API request
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        GATEWAY_POD="$(
+          kubectl get pods \
+            --namespace {{ istio_ingress_namespace }} \
+            --selector gateway.networking.k8s.io/gateway-name={{ istio_gateway_api_gateway_name }} \
+            --output=jsonpath='{.items[0].metadata.name}'
+        )"
+
+        GATEWAY_NODE="$(
+          kubectl get pod "${GATEWAY_POD}" \
+            --namespace {{ istio_ingress_namespace }} \
+            --output=jsonpath='{.spec.nodeName}'
+        )"
+
+        GATEWAY_NODE_IP="$(
+          kubectl get node "${GATEWAY_NODE}" \
+            --output=jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}'
+        )"
+
+        HTTP_NODE_PORT="$(
+          kubectl get service \
+            {{ istio_gateway_api_gateway_name }}-{{ istio_gateway_api_class_name }} \
+            --namespace {{ istio_ingress_namespace }} \
+            --output=jsonpath='{.spec.ports[?(@.port==80)].nodePort}'
+        )"
+
+        RESPONSE_FILE="/tmp/istio-gateway-api-response.txt"
+        rm -f "${RESPONSE_FILE}"
+
+        STATUS="$(
+          curl \
+            --silent \
+            --show-error \
+            --max-time 5 \
+            --header 'Host: {{ istio_gateway_api_host }}' \
+            --output "${RESPONSE_FILE}" \
+            --write-out '%{http_code}' \
+            "http://${GATEWAY_NODE_IP}:${HTTP_NODE_PORT}/gateway-api" \
+            || true
+        )"
+
+        BODY="$(
+          cat "${RESPONSE_FILE}" 2>/dev/null || true
+        )"
+
+        rm -f "${RESPONSE_FILE}"
+
+        echo "status=${STATUS}"
+        echo "body=${BODY}"
+
+        if [ "${STATUS}" != "200" ]; then
+          exit 1
+        fi
+
+        if ! grep -qx 'ingress-gateway-ok' <<< "${BODY}"; then
+          echo "Unexpected response body."
+          exit 1
+        fi
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_gateway_api_valid_request
+      retries: 15
+      delay: 2
+      until: istio_gateway_api_valid_request.rc == 0
+      changed_when: false
+
+    - name: Verify unmatched Gateway API hostname
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        GATEWAY_POD="$(
+          kubectl get pods \
+            --namespace {{ istio_ingress_namespace }} \
+            --selector gateway.networking.k8s.io/gateway-name={{ istio_gateway_api_gateway_name }} \
+            --output=jsonpath='{.items[0].metadata.name}'
+        )"
+
+        GATEWAY_NODE="$(
+          kubectl get pod "${GATEWAY_POD}" \
+            --namespace {{ istio_ingress_namespace }} \
+            --output=jsonpath='{.spec.nodeName}'
+        )"
+
+        GATEWAY_NODE_IP="$(
+          kubectl get node "${GATEWAY_NODE}" \
+            --output=jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}'
+        )"
+
+        HTTP_NODE_PORT="$(
+          kubectl get service \
+            {{ istio_gateway_api_gateway_name }}-{{ istio_gateway_api_class_name }} \
+            --namespace {{ istio_ingress_namespace }} \
+            --output=jsonpath='{.spec.ports[?(@.port==80)].nodePort}'
+        )"
+
+        STATUS="$(
+          curl \
+            --silent \
+            --show-error \
+            --max-time 5 \
+            --header 'Host: invalid.local' \
+            --output /dev/null \
+            --write-out '%{http_code}' \
+            "http://${GATEWAY_NODE_IP}:${HTTP_NODE_PORT}/gateway-api" \
+            || true
+        )"
+
+        echo "invalid_host_status=${STATUS}"
+
+        test "${STATUS}" = "404"
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_gateway_api_invalid_host
+      retries: 15
+      delay: 2
+      until: istio_gateway_api_invalid_host.rc == 0
+      changed_when: false
+
+    - name: Get Gateway API Gateway
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - gateways.gateway.networking.k8s.io
+          - "{{ istio_gateway_api_gateway_name }}"
+          - --namespace
+          - "{{ istio_ingress_namespace }}"
+          - --output=wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_gateway_api_gateway_runtime
+      changed_when: false
+
+    - name: Get Gateway API HTTPRoute
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - httproutes.gateway.networking.k8s.io
+          - "{{ istio_gateway_api_route_name }}"
+          - --namespace
+          - "{{ istio_test_namespace }}"
+          - --output=wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_gateway_api_route_runtime
+      changed_when: false
+
+    - name: Get Istio managed Gateway resources
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - deployment,service,pod
+          - --namespace
+          - "{{ istio_ingress_namespace }}"
+          - --selector
+          - gateway.networking.k8s.io/gateway-name={{ istio_gateway_api_gateway_name }}
+          - --output=wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_gateway_api_managed_resources
+      changed_when: false
+      
+    - name: Show Gateway API route status
+      ansible.builtin.debug:
+        msg: "{{ istio_gateway_api_route_status.stdout_lines }}"
+
+    - name: Show Gateway API endpoint
+      ansible.builtin.debug:
+        msg: "{{ istio_gateway_api_endpoint.stdout_lines }}"
+
+    - name: Show valid Gateway API request
+      ansible.builtin.debug:
+        msg: "{{ istio_gateway_api_valid_request.stdout_lines }}"
+
+    - name: Show invalid hostname result
+      ansible.builtin.debug:
+        msg: "{{ istio_gateway_api_invalid_host.stdout_lines }}"
+
+    - name: Show Gateway API Gateway
+      ansible.builtin.debug:
+        msg: "{{ istio_gateway_api_gateway_runtime.stdout_lines }}"
+
+    - name: Show Gateway API HTTPRoute
+      ansible.builtin.debug:
+        msg: "{{ istio_gateway_api_route_runtime.stdout_lines }}"
+
+    - name: Show Istio managed Gateway resources
+      ansible.builtin.debug:
+        msg: "{{ istio_gateway_api_managed_resources.stdout_lines }}"
