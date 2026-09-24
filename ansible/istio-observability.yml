@@ -145,40 +145,6 @@
         'created' in istio_observability_dashboard_apply.stdout or
         'configured' in istio_observability_dashboard_apply.stdout
 
-    - name: Verify Istio workload exposes Envoy Prometheus port
-      ansible.builtin.shell: |
-        set -o pipefail
-
-        POD="$(
-          kubectl get pods \
-            --namespace {{ istio_test_namespace }} \
-            --selector app=istio-routing-demo \
-            --output=jsonpath='{.items[0].metadata.name}'
-        )"
-
-        if [ -z "${POD}" ]; then
-          echo "Istio routing demo pod was not found."
-          exit 1
-        fi
-
-        PORTS="$(
-          kubectl get pod "${POD}" \
-            --namespace {{ istio_test_namespace }} \
-            --output=jsonpath='{range .spec.initContainers[*].ports[*]}{.name}:{.containerPort}{"\n"}{end}{range .spec.containers[*].ports[*]}{.name}:{.containerPort}{"\n"}{end}'
-        )"
-
-        echo "${PORTS}"
-
-        if ! grep -qx 'http-envoy-prom:15090' <<< "${PORTS}"; then
-          echo "Envoy Prometheus port was not found."
-          exit 1
-        fi
-      args:
-        executable: /bin/bash
-      environment:
-        KUBECONFIG: "{{ kubeconfig_path }}"
-      changed_when: false
-
     - name: Get Istio PodMonitors
       ansible.builtin.command:
         argv:

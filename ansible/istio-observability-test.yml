@@ -297,6 +297,42 @@
           Istio request metrics did not contain both v1 and v2.
           Observed versions: {{ istio_observability_versions }}
 
+    - name: Verify Istio workload exposes Envoy Prometheus port
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        POD="$(
+          kubectl get pods \
+            --namespace {{ istio_test_namespace }} \
+            --selector app={{ istio_routing_app }} \
+            --output=jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' |
+          sed -n '1p'
+        )"
+
+        if [ -z "${POD}" ]; then
+          echo "Istio routing demo pod was not found."
+          exit 1
+        fi
+
+        PORTS="$(
+          kubectl get pod "${POD}" \
+            --namespace {{ istio_test_namespace }} \
+            --output=jsonpath='{range .spec.initContainers[*].ports[*]}{.name}:{.containerPort}{"\n"}{end}{range .spec.containers[*].ports[*]}{.name}:{.containerPort}{"\n"}{end}'
+        )"
+
+        echo "pod=${POD}"
+        echo "${PORTS}"
+
+        if ! grep -qx 'http-envoy-prom:15090' <<< "${PORTS}"; then
+          echo "Envoy Prometheus port was not found."
+          exit 1
+        fi
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
     - name: Query mutual TLS metrics from Prometheus
       ansible.builtin.uri:
         url: >-
