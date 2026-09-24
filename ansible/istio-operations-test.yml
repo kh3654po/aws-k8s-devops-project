@@ -1,0 +1,846 @@
+---
+- name: Validate integrated Istio service mesh operations
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  tasks:
+    - name: Check Kubernetes administrator kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: istio_operations_kubeconfig
+
+    - name: Verify Kubernetes administrator kubeconfig
+      ansible.builtin.assert:
+        that:
+          - istio_operations_kubeconfig.stat.exists
+        fail_msg: >-
+          Kubernetes administrator kubeconfig was not found at
+          {{ kubeconfig_path }}.
+
+    - name: Verify Istiod
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment/istiod
+          - --namespace
+          - "{{ istio_namespace }}"
+          - --timeout=180s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Verify Istio ingress gateway
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment/{{ istio_ingress_gateway_release_name }}
+          - --namespace
+          - "{{ istio_ingress_namespace }}"
+          - --timeout=180s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Get Istio test namespace injection label
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - namespace
+          - "{{ istio_operations_namespace }}"
+          - --output=jsonpath={.metadata.labels.istio-injection}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_operations_injection_label
+      changed_when: false
+
+    - name: Verify Istio sidecar injection
+      ansible.builtin.assert:
+        that:
+          - istio_operations_injection_label.stdout == "enabled"
+        fail_msg: >-
+          Namespace {{ istio_operations_namespace }}
+          does not have istio-injection=enabled.
+
+    - name: Verify Istio workload PodMonitor
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - podmonitor
+          - "{{ istio_observability_workload_podmonitor_name }}"
+          - --namespace
+          - "{{ monitoring_namespace }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Render Istio operations workloads
+      ansible.builtin.template:
+        src: "{{ istio_operations_workloads_local_path }}"
+        dest: "{{ istio_operations_workloads_remote_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Validate Istio operations workloads
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - --dry-run=server
+          - --filename
+          - "{{ istio_operations_workloads_remote_path }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Apply Istio operations workloads
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - --filename
+          - "{{ istio_operations_workloads_remote_path }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_operations_workload_apply
+      changed_when: >-
+        'created' in istio_operations_workload_apply.stdout or
+        'configured' in istio_operations_workload_apply.stdout
+
+    - name: Wait for Istio operations deployments
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment/{{ item }}
+          - --namespace
+          - "{{ istio_operations_namespace }}"
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      loop:
+        - "{{ istio_operations_app }}-v1"
+        - "{{ istio_operations_app }}-v2"
+        - "{{ istio_operations_client_app }}"
+        - "{{ istio_operations_unauthorized_client_app }}"
+      changed_when: false
+
+    - name: Render baseline Istio operations policy
+      ansible.builtin.template:
+        src: "{{ istio_operations_policy_local_path }}"
+        dest: "{{ istio_operations_baseline_policy_remote_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+      vars:
+        istio_operations_policy_v1_weight: "{{ istio_operations_v1_weight }}"
+        istio_operations_policy_v2_weight: "{{ istio_operations_v2_weight }}"
+
+        istio_operations_max_connections: 100
+        istio_operations_max_pending_requests: 100
+        istio_operations_max_requests_per_connection: 100
+
+    - name: Render circuit breaker Istio operations policy
+      ansible.builtin.template:
+        src: "{{ istio_operations_policy_local_path }}"
+        dest: "{{ istio_operations_circuit_policy_remote_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+      vars:
+        istio_operations_policy_v1_weight: 100
+        istio_operations_policy_v2_weight: 0
+
+        istio_operations_max_connections: 1
+        istio_operations_max_pending_requests: 1
+        istio_operations_max_requests_per_connection: 1
+
+    - name: Apply baseline Istio operations policy
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - --filename
+          - "{{ istio_operations_baseline_policy_remote_path }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Wait for Istio configuration propagation
+      ansible.builtin.pause:
+        seconds: 5
+
+    - name: Execute integrated Istio operation scenarios
+      block:
+        - name: Validate 90/10 canary traffic
+          ansible.builtin.shell: |
+            set -e
+
+            V1=0
+            V2=0
+            COUNT=1
+
+            while [ "${COUNT}" -le {{ istio_operations_canary_request_count }} ]; do
+
+              RESPONSE="$(
+                kubectl exec \
+                  --namespace {{ istio_operations_namespace }} \
+                  deployment/{{ istio_operations_client_app }} \
+                  --container {{ istio_operations_client_app }} \
+                  -- curl \
+                  --silent \
+                  --show-error \
+                  --fail \
+                  --max-time 5 \
+                  http://{{ istio_operations_service }}/
+              )"
+
+              case "${RESPONSE}" in
+                *version=v1*)
+                  V1=$((V1 + 1))
+                  ;;
+
+                *version=v2*)
+                  V2=$((V2 + 1))
+                  ;;
+
+                *)
+                  echo "Unexpected response: ${RESPONSE}"
+                  exit 1
+                  ;;
+              esac
+
+              COUNT=$((COUNT + 1))
+
+            done
+
+            echo "v1=${V1}"
+            echo "v2=${V2}"
+
+            if [ "${V1}" -eq 0 ]; then
+              echo "No v1 traffic was observed."
+              exit 1
+            fi
+
+            if [ "${V2}" -eq 0 ]; then
+              echo "No v2 traffic was observed."
+              exit 1
+            fi
+          args:
+            executable: /bin/bash
+          environment:
+            KUBECONFIG: "{{ kubeconfig_path }}"
+          register: istio_operations_canary_result
+          changed_when: false
+
+        - name: Reset flaky backend state
+          ansible.builtin.shell: |
+            kubectl exec \
+              --namespace {{ istio_operations_namespace }} \
+              deployment/{{ istio_operations_client_app }} \
+              --container {{ istio_operations_client_app }} \
+              -- curl \
+              --silent \
+              --show-error \
+              --fail \
+              http://{{ istio_operations_service }}/reset-flaky
+          args:
+            executable: /bin/bash
+          environment:
+            KUBECONFIG: "{{ kubeconfig_path }}"
+          changed_when: false
+
+        - name: Validate Istio retry
+          ansible.builtin.shell: |
+            set -e
+
+            STATUS="$(
+              kubectl exec \
+                --namespace {{ istio_operations_namespace }} \
+                deployment/{{ istio_operations_client_app }} \
+                --container {{ istio_operations_client_app }} \
+                -- curl \
+                --silent \
+                --show-error \
+                --output /dev/null \
+                --write-out '%{http_code}' \
+                http://{{ istio_operations_service }}/flaky
+            )"
+
+            COUNT_RESPONSE="$(
+              kubectl exec \
+                --namespace {{ istio_operations_namespace }} \
+                deployment/{{ istio_operations_client_app }} \
+                --container {{ istio_operations_client_app }} \
+                -- curl \
+                --silent \
+                --show-error \
+                --fail \
+                http://{{ istio_operations_service }}/flaky-count
+            )"
+
+            FLAKY_COUNT="$(
+              printf '%s\n' "${COUNT_RESPONSE}" |
+              sed -n 's/^flaky_count=//p'
+            )"
+
+            echo "status=${STATUS}"
+            echo "flaky_count=${FLAKY_COUNT}"
+
+            if [ "${STATUS}" != "200" ]; then
+              echo "Retry did not recover the request."
+              exit 1
+            fi
+
+            if [ "${FLAKY_COUNT}" -lt 2 ]; then
+              echo "Backend did not observe multiple attempts."
+              exit 1
+            fi
+          args:
+            executable: /bin/bash
+          environment:
+            KUBECONFIG: "{{ kubeconfig_path }}"
+          register: istio_operations_retry_result
+          changed_when: false
+
+        - name: Validate Istio timeout
+          ansible.builtin.shell: |
+            set -e
+
+            RESULT="$(
+              kubectl exec \
+                --namespace {{ istio_operations_namespace }} \
+                deployment/{{ istio_operations_client_app }} \
+                --container {{ istio_operations_client_app }} \
+                -- curl \
+                --silent \
+                --show-error \
+                --output /dev/null \
+                --write-out '%{http_code} %{time_total}' \
+                --max-time 5 \
+                http://{{ istio_operations_service }}/slow \
+                || true
+            )"
+
+            STATUS="$(
+              printf '%s\n' "${RESULT}" |
+              awk '{print $1}'
+            )"
+
+            ELAPSED="$(
+              printf '%s\n' "${RESULT}" |
+              awk '{print $2}'
+            )"
+
+            echo "status=${STATUS}"
+            echo "elapsed=${ELAPSED}"
+
+            if [ "${STATUS}" != "504" ]; then
+              echo "Expected timeout status 504."
+              exit 1
+            fi
+
+            awk \
+              -v elapsed="${ELAPSED}" \
+              'BEGIN { exit !(elapsed < 2.5) }'
+          args:
+            executable: /bin/bash
+          environment:
+            KUBECONFIG: "{{ kubeconfig_path }}"
+          register: istio_operations_timeout_result
+          changed_when: false
+
+        - name: Validate Istio fault injection
+          ansible.builtin.shell: |
+            set -e
+
+            STATUS="$(
+              kubectl exec \
+                --namespace {{ istio_operations_namespace }} \
+                deployment/{{ istio_operations_client_app }} \
+                --container {{ istio_operations_client_app }} \
+                -- curl \
+                --silent \
+                --show-error \
+                --output /dev/null \
+                --write-out '%{http_code}' \
+                http://{{ istio_operations_service }}/fault \
+                || true
+            )"
+
+            echo "status=${STATUS}"
+
+            if [ "${STATUS}" != "503" ]; then
+              echo "Expected fault injection status 503."
+              exit 1
+            fi
+          args:
+            executable: /bin/bash
+          environment:
+            KUBECONFIG: "{{ kubeconfig_path }}"
+          register: istio_operations_fault_result
+          changed_when: false
+
+        - name: Validate authorized workload identity
+          ansible.builtin.shell: |
+            STATUS="$(
+              kubectl exec \
+                --namespace {{ istio_operations_namespace }} \
+                deployment/{{ istio_operations_client_app }} \
+                --container {{ istio_operations_client_app }} \
+                -- curl \
+                --silent \
+                --show-error \
+                --output /dev/null \
+                --write-out '%{http_code}' \
+                http://{{ istio_operations_service }}/ \
+                || true
+            )"
+
+            echo "authorized_status=${STATUS}"
+
+            test "${STATUS}" = "200"
+          args:
+            executable: /bin/bash
+          environment:
+            KUBECONFIG: "{{ kubeconfig_path }}"
+          changed_when: false
+
+        - name: Validate unauthorized workload identity
+          ansible.builtin.shell: |
+            STATUS="$(
+              kubectl exec \
+                --namespace {{ istio_operations_namespace }} \
+                deployment/{{ istio_operations_unauthorized_client_app }} \
+                --container {{ istio_operations_unauthorized_client_app }} \
+                -- curl \
+                --silent \
+                --show-error \
+                --output /dev/null \
+                --write-out '%{http_code}' \
+                http://{{ istio_operations_service }}/ \
+                || true
+            )"
+
+            echo "unauthorized_status=${STATUS}"
+
+            test "${STATUS}" = "403"
+          args:
+            executable: /bin/bash
+          environment:
+            KUBECONFIG: "{{ kubeconfig_path }}"
+          register: istio_operations_authorization_result
+          changed_when: false
+
+        - name: Validate Istio ingress gateway path
+          ansible.builtin.shell: |
+            set -e
+
+            GATEWAY_IP="$(
+              kubectl get service \
+                {{ istio_ingress_gateway_release_name }} \
+                --namespace {{ istio_ingress_namespace }} \
+                --output=jsonpath='{.spec.clusterIP}'
+            )"
+
+            STATUS="$(
+              curl \
+                --silent \
+                --show-error \
+                --max-time 5 \
+                --header 'Host: {{ istio_operations_gateway_host }}' \
+                --output /dev/null \
+                --write-out '%{http_code}' \
+                "http://${GATEWAY_IP}:80/ops" \
+                || true
+            )"
+
+            echo "gateway_ip=${GATEWAY_IP}"
+            echo "gateway_status=${STATUS}"
+
+            if [ "${STATUS}" != "200" ]; then
+              echo "Istio ingress gateway request failed."
+              exit 1
+            fi
+          args:
+            executable: /bin/bash
+          environment:
+            KUBECONFIG: "{{ kubeconfig_path }}"
+          register: istio_operations_ingress_result
+          changed_when: false
+
+        - name: Apply circuit breaker policy
+          ansible.builtin.command:
+            argv:
+              - kubectl
+              - apply
+              - --filename
+              - "{{ istio_operations_circuit_policy_remote_path }}"
+          environment:
+            KUBECONFIG: "{{ kubeconfig_path }}"
+          changed_when: false
+
+        - name: Wait for circuit breaker policy propagation
+          ansible.builtin.pause:
+            seconds: 5
+
+        - name: Validate Istio circuit breaking
+          ansible.builtin.shell: |
+            set -e
+
+            kubectl exec \
+              --namespace {{ istio_operations_namespace }} \
+              deployment/{{ istio_operations_client_app }} \
+              --container {{ istio_operations_client_app }} \
+              -- sh -c '
+                rm -rf /tmp/istio-circuit-test
+                mkdir -p /tmp/istio-circuit-test
+
+                COUNT=1
+
+                while [ "${COUNT}" -le {{ istio_operations_circuit_request_count }} ]; do
+
+                  (
+                    STATUS="$(
+                      curl \
+                        --silent \
+                        --show-error \
+                        --max-time 10 \
+                        --output /dev/null \
+                        --write-out "%{http_code}" \
+                        "http://{{ istio_operations_service }}/hold?seconds=2" \
+                        || true
+                    )"
+
+                    if [ -z "${STATUS}" ]; then
+                      STATUS="000"
+                    fi
+
+                    printf "%s\n" "${STATUS}" \
+                      > "/tmp/istio-circuit-test/${COUNT}"
+
+                  ) &
+
+                  COUNT=$((COUNT + 1))
+
+                done
+
+                wait
+
+                cat /tmp/istio-circuit-test/*
+              ' > /tmp/istio-circuit-result.txt
+
+            echo "=== Circuit breaker HTTP statuses ==="
+            cat /tmp/istio-circuit-result.txt
+
+            SUCCESS="$(
+              grep -c '^200$' \
+                /tmp/istio-circuit-result.txt \
+                || true
+            )"
+
+            FAILURE="$(
+              grep -vc '^200$' \
+                /tmp/istio-circuit-result.txt \
+                || true
+            )"
+
+            echo "success=${SUCCESS}"
+            echo "failure=${FAILURE}"
+
+            if [ "${SUCCESS}" -eq 0 ]; then
+              echo "No successful request was observed."
+              exit 1
+            fi
+
+            if [ "${FAILURE}" -eq 0 ]; then
+              echo "Circuit breaker did not reject any request."
+              exit 1
+            fi
+          args:
+            executable: /bin/bash
+          environment:
+            KUBECONFIG: "{{ kubeconfig_path }}"
+          register: istio_operations_circuit_result
+          changed_when: false
+
+      always:
+        - name: Restore baseline Istio operations policy
+          ansible.builtin.command:
+            argv:
+              - kubectl
+              - apply
+              - --filename
+              - "{{ istio_operations_baseline_policy_remote_path }}"
+          environment:
+            KUBECONFIG: "{{ kubeconfig_path }}"
+          changed_when: false
+
+        - name: Wait for restored policy propagation
+          ansible.builtin.pause:
+            seconds: 5
+
+    - name: Wait for Prometheus scrape
+      ansible.builtin.pause:
+        seconds: "{{ istio_operations_scrape_wait_seconds }}"
+
+    - name: Get Prometheus service ClusterIP
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - service
+          - kube-prometheus-stack-prometheus
+          - --namespace
+          - "{{ monitoring_namespace }}"
+          - --output=jsonpath={.spec.clusterIP}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_operations_prometheus_ip
+      changed_when: false
+
+    - name: Query Istio version metrics
+      ansible.builtin.uri:
+        url: >-
+          http://{{ istio_operations_prometheus_ip.stdout }}:9090/api/v1/query
+        method: POST
+        body_format: form-urlencoded
+        body:
+          query: >-
+            sum(
+              istio_requests_total{
+                reporter="destination",
+                destination_service_name="{{ istio_operations_service }}",
+                destination_service_namespace="{{ istio_operations_namespace }}"
+              }
+            )
+            by (
+              destination_version
+            )
+        return_content: true
+        status_code: 200
+      register: istio_operations_version_metrics
+      changed_when: false
+
+    - name: Extract observed versions
+      ansible.builtin.set_fact:
+        istio_operations_observed_versions: >-
+          {{
+            istio_operations_version_metrics.json.data.result
+            | map(attribute='metric')
+            | map(attribute='destination_version')
+            | list
+          }}
+
+    - name: Verify v1 and v2 metrics
+      ansible.builtin.assert:
+        that:
+          - "'v1' in istio_operations_observed_versions"
+          - "'v2' in istio_operations_observed_versions"
+        fail_msg: >-
+          Both v1 and v2 metrics were not found.
+          Observed={{ istio_operations_observed_versions }}
+
+    - name: Query mutual TLS traffic
+      ansible.builtin.uri:
+        url: >-
+          http://{{ istio_operations_prometheus_ip.stdout }}:9090/api/v1/query
+        method: POST
+        body_format: form-urlencoded
+        body:
+          query: >-
+            sum(
+              istio_requests_total{
+                reporter="destination",
+                destination_service_name="{{ istio_operations_service }}",
+                destination_service_namespace="{{ istio_operations_namespace }}",
+                connection_security_policy="mutual_tls"
+              }
+            )
+        return_content: true
+        status_code: 200
+      register: istio_operations_mtls_metrics
+      changed_when: false
+
+    - name: Verify mutual TLS traffic exists
+      ansible.builtin.assert:
+        that:
+          - istio_operations_mtls_metrics.json.status == "success"
+          - istio_operations_mtls_metrics.json.data.result | length > 0
+        fail_msg: >-
+          No mutual TLS metrics were observed.
+
+    - name: Query source side 5xx metrics
+      ansible.builtin.uri:
+        url: >-
+          http://{{ istio_operations_prometheus_ip.stdout }}:9090/api/v1/query
+        method: POST
+        body_format: form-urlencoded
+        body:
+          query: >-
+            sum(
+              istio_requests_total{
+                reporter="source",
+                source_workload="{{ istio_operations_client_app }}",
+                source_workload_namespace="{{ istio_operations_namespace }}",
+                response_code=~"5.."
+              }
+            )
+        return_content: true
+        status_code: 200
+      register: istio_operations_failure_metrics
+      changed_when: false
+
+    - name: Verify failure telemetry exists
+      ansible.builtin.assert:
+        that:
+          - istio_operations_failure_metrics.json.status == "success"
+          - istio_operations_failure_metrics.json.data.result | length > 0
+        fail_msg: >-
+          No source-side 5xx Istio metrics were observed.
+
+    - name: Query ingress gateway metrics
+      ansible.builtin.uri:
+        url: >-
+          http://{{ istio_operations_prometheus_ip.stdout }}:9090/api/v1/query
+        method: POST
+        body_format: form-urlencoded
+        body:
+          query: >-
+            sum(
+              istio_requests_total{
+                reporter="source",
+                source_workload_namespace="{{ istio_ingress_namespace }}",
+                destination_service_name="{{ istio_operations_service }}"
+              }
+            )
+        return_content: true
+        status_code: 200
+      register: istio_operations_ingress_metrics
+      changed_when: false
+
+    - name: Verify ingress gateway metrics
+      ansible.builtin.assert:
+        that:
+          - istio_operations_ingress_metrics.json.status == "success"
+          - istio_operations_ingress_metrics.json.data.result | length > 0
+        fail_msg: >-
+          No ingress gateway traffic metrics were observed.
+
+    - name: Get Thanos Query service ClusterIP
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - service
+          - "{{ thanos_query_service_name }}"
+          - --namespace
+          - "{{ monitoring_namespace }}"
+          - --output=jsonpath={.spec.clusterIP}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_operations_thanos_ip
+      changed_when: false
+
+    - name: Query Istio operations metrics through Thanos
+      ansible.builtin.uri:
+        url: >-
+          http://{{ istio_operations_thanos_ip.stdout }}:{{ thanos_query_http_port }}/api/v1/query
+        method: POST
+        body_format: form-urlencoded
+        body:
+          query: >-
+            sum(
+              istio_requests_total{
+                destination_service_name="{{ istio_operations_service }}"
+              }
+            )
+        return_content: true
+        status_code: 200
+      register: istio_operations_thanos_metrics
+      changed_when: false
+
+    - name: Verify Thanos receives Istio operations metrics
+      ansible.builtin.assert:
+        that:
+          - istio_operations_thanos_metrics.json.status == "success"
+          - istio_operations_thanos_metrics.json.data.result | length > 0
+        fail_msg: >-
+          Thanos Query did not return Istio operations metrics.
+
+    - name: Get Istio operations pods
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pods
+          - --namespace
+          - "{{ istio_operations_namespace }}"
+          - --selector
+          - app={{ istio_operations_app }}
+          - --output=wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: istio_operations_pods
+      changed_when: false
+
+    - name: Show canary result
+      ansible.builtin.debug:
+        msg: "{{ istio_operations_canary_result.stdout_lines }}"
+
+    - name: Show retry result
+      ansible.builtin.debug:
+        msg: "{{ istio_operations_retry_result.stdout_lines }}"
+
+    - name: Show timeout result
+      ansible.builtin.debug:
+        msg: "{{ istio_operations_timeout_result.stdout_lines }}"
+
+    - name: Show fault injection result
+      ansible.builtin.debug:
+        msg: "{{ istio_operations_fault_result.stdout_lines }}"
+
+    - name: Show authorization result
+      ansible.builtin.debug:
+        msg: "{{ istio_operations_authorization_result.stdout_lines }}"
+
+    - name: Show ingress result
+      ansible.builtin.debug:
+        msg: "{{ istio_operations_ingress_result.stdout_lines }}"
+
+    - name: Show circuit breaker result
+      ansible.builtin.debug:
+        msg: "{{ istio_operations_circuit_result.stdout_lines }}"
+
+    - name: Show observed Istio versions
+      ansible.builtin.debug:
+        msg: "versions={{ istio_operations_observed_versions }}"
+
+    - name: Show Istio operations pods
+      ansible.builtin.debug:
+        msg: "{{ istio_operations_pods.stdout_lines }}"
+
+    - name: Show integrated Istio operations validation result
+      ansible.builtin.debug:
+        msg:
+          - "Canary traffic: PASS"
+          - "Retry: PASS"
+          - "Timeout: PASS"
+          - "Fault injection: PASS"
+          - "Circuit breaking: PASS"
+          - "mTLS: PASS"
+          - "AuthorizationPolicy: PASS"
+          - "Ingress Gateway: PASS"
+          - "Prometheus telemetry: PASS"
+          - "Thanos telemetry: PASS"

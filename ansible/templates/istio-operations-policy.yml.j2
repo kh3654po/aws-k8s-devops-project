@@ -1,0 +1,137 @@
+---
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+
+metadata:
+  name: "{{ istio_operations_destinationrule_name }}"
+  namespace: "{{ istio_operations_namespace }}"
+
+spec:
+  host: "{{ istio_operations_service }}"
+
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        maxConnections: {{ istio_operations_max_connections }}
+
+      http:
+        http1MaxPendingRequests: {{ istio_operations_max_pending_requests }}
+        maxRequestsPerConnection: {{ istio_operations_max_requests_per_connection }}
+
+  subsets:
+    - name: v1
+
+      labels:
+        version: v1
+
+    - name: v2
+
+      labels:
+        version: v2
+
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+
+metadata:
+  name: "{{ istio_operations_virtualservice_name }}"
+  namespace: "{{ istio_operations_namespace }}"
+
+spec:
+  hosts:
+    - "{{ istio_operations_service }}"
+
+  gateways:
+    - mesh
+
+  http:
+    - name: retry
+
+      match:
+        - uri:
+            exact: /flaky
+
+      retries:
+        attempts: 2
+        perTryTimeout: 1s
+        retryOn: 5xx
+
+      timeout: 5s
+
+      route:
+        - destination:
+            host: "{{ istio_operations_service }}"
+            subset: v1
+
+    - name: timeout
+
+      match:
+        - uri:
+            exact: /slow
+
+      timeout: 1s
+
+      route:
+        - destination:
+            host: "{{ istio_operations_service }}"
+            subset: v1
+
+    - name: fault
+
+      match:
+        - uri:
+            exact: /fault
+
+      fault:
+        abort:
+          percentage:
+            value: 100
+
+          httpStatus: 503
+
+      route:
+        - destination:
+            host: "{{ istio_operations_service }}"
+            subset: v1
+
+    - name: hold
+
+      match:
+        - uri:
+            prefix: /hold
+
+      timeout: 10s
+
+      route:
+        - destination:
+            host: "{{ istio_operations_service }}"
+            subset: v1
+
+    - name: retry-helper
+
+      match:
+        - uri:
+            exact: /reset-flaky
+
+        - uri:
+            exact: /flaky-count
+
+      route:
+        - destination:
+            host: "{{ istio_operations_service }}"
+            subset: v1
+
+    - name: canary
+
+      route:
+        - destination:
+            host: "{{ istio_operations_service }}"
+            subset: v1
+
+          weight: {{ istio_operations_policy_v1_weight }}
+
+        - destination:
+            host: "{{ istio_operations_service }}"
+            subset: v2
+
+          weight: {{ istio_operations_policy_v2_weight }}

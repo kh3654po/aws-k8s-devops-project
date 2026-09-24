@@ -583,3 +583,43 @@ istio_observability_test_v2_requests: 30
 istio_observability_test_ingress_requests: 30
 
 istio_observability_scrape_wait_seconds: 40
+
+# Istio Integrated Operations Test
+istio_operations_namespace: "{{ istio_test_namespace }}"
+
+istio_operations_app: istio-ops-demo
+istio_operations_service: istio-ops-demo
+
+istio_operations_server_service_account: istio-ops-demo
+
+istio_operations_client_app: istio-ops-client
+istio_operations_client_service_account: istio-ops-client
+
+istio_operations_unauthorized_client_app: istio-ops-unauthorized
+istio_operations_unauthorized_service_account: istio-ops-unauthorized
+
+istio_operations_destinationrule_name: istio-ops-demo
+istio_operations_virtualservice_name: istio-ops-demo
+
+istio_operations_peer_authentication_name: istio-ops-demo-strict
+istio_operations_authorization_policy_name: istio-ops-demo-allow
+
+istio_operations_gateway_name: istio-ops-demo-gateway
+istio_operations_ingress_virtualservice_name: istio-ops-demo-ingress
+istio_operations_gateway_host: ops-demo.local
+
+istio_operations_workloads_local_path: templates/istio-operations-workloads.yml.j2
+istio_operations_workloads_remote_path: /tmp/istio-operations-workloads.yml
+
+istio_operations_policy_local_path: templates/istio-operations-policy.yml.j2
+
+istio_operations_baseline_policy_remote_path: /tmp/istio-operations-policy-baseline.yml
+istio_operations_circuit_policy_remote_path: /tmp/istio-operations-policy-circuit.yml
+
+istio_operations_v1_weight: 90
+istio_operations_v2_weight: 10
+
+istio_operations_canary_request_count: 200
+istio_operations_circuit_request_count: 20
+
+istio_operations_scrape_wait_seconds: 40
