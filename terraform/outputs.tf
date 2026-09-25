@@ -51,6 +51,21 @@ output "thanos_s3_bucket_arn" {
 }
 
 output "thanos_s3_iam_policy_arn" {
-  description = "IAM policy ARN used by Thanos components to access S3"
-  value       = aws_iam_policy.thanos_s3.arn
+  value = aws_iam_policy.thanos_s3.arn
+}
+
+output "ecr_repository_name" {
+  value = aws_ecr_repository.devops_demo.name
+}
+
+output "ecr_repository_url" {
+  value = aws_ecr_repository.devops_demo.repository_url
+}
+
+output "ecr_repository_arn" {
+  value = aws_ecr_repository.devops_demo.arn
+}
+
+output "ecr_registry_id" {
+  value = aws_ecr_repository.devops_demo.registry_id
 }

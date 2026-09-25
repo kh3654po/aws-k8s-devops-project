@@ -88,3 +88,18 @@ variable "ingress_nginx_https_nodeport" {
   type    = number
   default = 30443
 }
+
+variable "ecr_force_delete" {
+  type    = bool
+  default = true
+}
+
+variable "ecr_untagged_image_retention_days" {
+  type    = number
+  default = 7
+}
+
+variable "ecr_max_image_count" {
+  type    = number
+  default = 50
+}
