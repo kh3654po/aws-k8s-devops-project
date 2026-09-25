@@ -1,0 +1,12 @@
+.git
+.gitignore
+
+Dockerfile
+
+README.md
+
+*.log
+
+coverage.out
+
+ksh-devops-demo
