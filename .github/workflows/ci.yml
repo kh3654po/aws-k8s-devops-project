@@ -1,0 +1,263 @@
+name: Application CI
+
+on:
+  pull_request:
+    branches:
+      - main
+
+    paths:
+      - "ansible/app/**"
+      - ".github/workflows/ci.yml"
+
+  push:
+    branches:
+      - main
+
+    paths:
+      - "ansible/app/**"
+      - ".github/workflows/ci.yml"
+
+  workflow_dispatch:
+
+env:
+  APP_DIR: ansible/app
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+
+jobs:
+  # ========================================================
+  # Test
+  # ========================================================
+
+  test:
+    name: Test application
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+
+        with:
+          go-version-file: ansible/app/go.mod
+          cache: true
+          cache-dependency-path: ansible/app/go.mod
+
+      - name: Verify Go source
+        working-directory: ${{ env.APP_DIR }}
+
+        run: |
+          go vet ./...
+
+      - name: Run unit tests
+        working-directory: ${{ env.APP_DIR }}
+
+        run: |
+          go test -v ./...
+
+      - name: Build test container image
+        working-directory: ${{ env.APP_DIR }}
+
+        run: |
+          BUILD_TIME="$(
+            date -u +'%Y-%m-%dT%H:%M:%SZ'
+          )"
+
+          docker build \
+            --build-arg VERSION=ci \
+            --build-arg COMMIT="${GITHUB_SHA}" \
+            --build-arg BUILD_TIME="${BUILD_TIME}" \
+            --tag ksh-devops-demo:ci \
+            .
+
+      - name: Run container smoke test
+        run: |
+          docker run \
+            --detach \
+            --name ksh-devops-demo-ci \
+            --publish 127.0.0.1:18080:8080 \
+            ksh-devops-demo:ci
+
+          cleanup() {
+            docker rm \
+              --force \
+              ksh-devops-demo-ci \
+              >/dev/null 2>&1 || true
+          }
+
+          trap cleanup EXIT
+
+          for attempt in {1..20}; do
+            if curl \
+              --fail \
+              --silent \
+              --show-error \
+              http://127.0.0.1:18080/healthz
+            then
+              break
+            fi
+
+            if [[ "${attempt}" -eq 20 ]]; then
+              echo
+              echo "Container health check failed."
+
+              docker logs ksh-devops-demo-ci
+
+              exit 1
+            fi
+
+            sleep 1
+          done
+
+          echo
+          echo "Health endpoint:"
+          curl \
+            --fail \
+            --silent \
+            --show-error \
+            http://127.0.0.1:18080/healthz
+
+          echo
+          echo
+          echo "Version endpoint:"
+          curl \
+            --fail \
+            --silent \
+            --show-error \
+            http://127.0.0.1:18080/version
+
+          echo
+
+  # ========================================================
+  # Publish
+  # ========================================================
+
+  publish:
+    name: Publish image to Amazon ECR
+
+    needs:
+      - test
+
+    if: >-
+      github.ref == 'refs/heads/main'
+      &&
+      github.event_name != 'pull_request'
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Validate CI configuration
+        env:
+          AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+
+        run: |
+          if [[ -z "${AWS_REGION}" ]]; then
+            echo "ERROR: AWS_REGION repository variable is empty."
+            exit 1
+          fi
+
+          if [[ -z "${AWS_ACCOUNT_ID}" ]]; then
+            echo "ERROR: AWS_ACCOUNT_ID repository variable is empty."
+            exit 1
+          fi
+
+          if [[ -z "${AWS_ROLE_ARN}" ]]; then
+            echo "ERROR: AWS_ROLE_ARN repository variable is empty."
+            exit 1
+          fi
+
+          if [[ -z "${ECR_REPOSITORY}" ]]; then
+            echo "ERROR: ECR_REPOSITORY repository variable is empty."
+            exit 1
+          fi
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          role-session-name: github-actions-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Generate image metadata
+        id: image-metadata
+
+        shell: bash
+
+        run: |
+          SHORT_SHA="${GITHUB_SHA::12}"
+
+          IMAGE_TAG="sha-${SHORT_SHA}-run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+          BUILD_TIME="$(
+            date -u +'%Y-%m-%dT%H:%M:%SZ'
+          )"
+
+          echo "image_tag=${IMAGE_TAG}" >> "${GITHUB_OUTPUT}"
+          echo "build_time=${BUILD_TIME}" >> "${GITHUB_OUTPUT}"
+
+          echo "Image tag : ${IMAGE_TAG}"
+          echo "Commit    : ${GITHUB_SHA}"
+          echo "Build time: ${BUILD_TIME}"
+
+      - name: Build and push container image
+        uses: docker/build-push-action@v7
+
+        with:
+          context: ./ansible/app
+          file: ./ansible/app/Dockerfile
+
+          push: true
+
+          tags: >-
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.image-metadata.outputs.image_tag }}
+
+          build-args: |
+            VERSION=${{ steps.image-metadata.outputs.image_tag }}
+            COMMIT=${{ github.sha }}
+            BUILD_TIME=${{ steps.image-metadata.outputs.build_time }}
+
+      - name: Show published image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ steps.image-metadata.outputs.image_tag }}
+
+        run: |
+          IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+
+          echo
+          echo "Published image:"
+          echo "${IMAGE_URI}"
+
+          {
+            echo "## Published container image"
+            echo
+            echo "\`${IMAGE_URI}\`"
+            echo
+            echo "Commit:"
+            echo
+            echo "\`${GITHUB_SHA}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
