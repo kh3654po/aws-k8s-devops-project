@@ -12,19 +12,47 @@ TERRAFORM_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # 프로젝트 root 디렉토리
 PROJECT_ROOT="$(cd "${TERRAFORM_DIR}/.." && pwd)"
 
+# Ansible 디렉토리
+ANSIBLE_DIR="${PROJECT_ROOT}/ansible"
+
 # Inventory 생성 스크립트
 INVENTORY_SCRIPT="${PROJECT_ROOT}/scripts/generate_inventory.sh"
 
+# Ansible 변수 생성 스크립트
+ANSIBLE_VARS_SCRIPT="${SCRIPT_DIR}/generate_ansible_vars.sh"
+
+# Kubernetes-managed AWS resource cleanup completion marker
+CLEANUP_MARKER="${TERRAFORM_DIR}/.k8s-cloud-cleanup-complete"
+
 # Terraform plan 파일 이름
-PLAN_FILE="tfplan"
+PLAN_FILE="${TERRAFORM_DIR}/tfplan"
+
+cleanup() {
+  rm -f "${PLAN_FILE}"
+}
+
+trap cleanup EXIT
 
 # 필수 명령어 확인
-for required_command in terraform curl; do
+for required_command in \
+  terraform \
+  curl \
+  jq \
+  ansible \
+  ansible-playbook
+do
   if ! command -v "${required_command}" >/dev/null 2>&1; then
     echo "Error: ${required_command} command was not found."
     exit 1
   fi
 done
+
+# Terraform 디렉토리 확인
+if [[ ! -d "${TERRAFORM_DIR}" ]]; then
+  echo "Error: Terraform directory was not found."
+  echo "Path: ${TERRAFORM_DIR}"
+  exit 1
+fi
 
 # Inventory 생성 스크립트 확인
 if [[ ! -f "${INVENTORY_SCRIPT}" ]]; then
@@ -38,6 +66,28 @@ if [[ ! -x "${INVENTORY_SCRIPT}" ]]; then
   echo
   echo "Run:"
   echo "chmod +x ${INVENTORY_SCRIPT}"
+  exit 1
+fi
+
+# Ansible 디렉토리 확인
+if [[ ! -d "${ANSIBLE_DIR}" ]]; then
+  echo "Error: Ansible directory was not found."
+  echo "Path: ${ANSIBLE_DIR}"
+  exit 1
+fi
+
+# Ansible 변수 생성 스크립트 및 실행 권한 확인
+if [[ ! -f "${ANSIBLE_VARS_SCRIPT}" ]]; then
+  echo "Error: Ansible variable generation script was not found."
+  echo "Path: ${ANSIBLE_VARS_SCRIPT}"
+  exit 1
+fi
+
+if [[ ! -x "${ANSIBLE_VARS_SCRIPT}" ]]; then
+  echo "Error: Ansible variable generation script is not executable."
+  echo
+  echo "Run:"
+  echo "chmod +x ${ANSIBLE_VARS_SCRIPT}"
   exit 1
 fi
 
@@ -105,6 +155,14 @@ terraform -chdir="${TERRAFORM_DIR}" apply \
 
 echo
 
+if [[ -f "${CLEANUP_MARKER}" ]]; then
+  rm -f "${CLEANUP_MARKER}"
+
+  echo
+  echo "Removed stale Kubernetes cleanup marker:"
+  echo "${CLEANUP_MARKER}"
+fi
+
 # Ansible Inventory 생성
 echo "[7/8] Generating Ansible inventory..."
 
@@ -123,32 +181,36 @@ echo "========================================"
 MAX_RETRIES=10
 RETRY_INTERVAL=3
 
-for ((attempt=1; attempt<=MAX_RETRIES; attempt++)); do
+(
+  cd "${ANSIBLE_DIR}"
+
+  for ((attempt=1; attempt<=MAX_RETRIES; attempt++)); do
+    echo
+    echo "Ansible connectivity check ${attempt}/${MAX_RETRIES}..."
+
+    if ansible all -m ping; then
+      echo
+      echo "All hosts are reachable by Ansible."
+      break
+    fi
+
+    if (( attempt == MAX_RETRIES )); then
+      echo
+      echo "Error: Ansible connectivity check failed after ${MAX_RETRIES} attempts."
+      exit 1
+    fi
+
+    echo "Hosts are not ready yet. Retrying in ${RETRY_INTERVAL} seconds..."
+    sleep "${RETRY_INTERVAL}"
+  done
+
   echo
-  echo "Ansible connectivity check ${attempt}/${MAX_RETRIES}..."
+  echo "========================================"
+  echo "Running Ansible site playbook"
+  echo "========================================"
 
-  if ansible all -m ping; then
-    echo
-    echo "All hosts are reachable by Ansible."
-    break
-  fi
-
-  if (( attempt == MAX_RETRIES )); then
-    echo
-    echo "Error: Ansible connectivity check failed after ${MAX_RETRIES} attempts."
-    exit 1
-  fi
-
-  echo "Hosts are not ready yet. Retrying in ${RETRY_INTERVAL} seconds..."
-  sleep "${RETRY_INTERVAL}"
-done
-
-echo
-echo "========================================"
-echo "Running Ansible site playbook"
-echo "========================================"
-
-ansible-playbook site.yml
+  ansible-playbook site.yml
+)
 
 echo
 echo "========================================"
