@@ -69,3 +69,19 @@ output "ecr_repository_arn" {
 output "ecr_registry_id" {
   value = aws_ecr_repository.devops_demo.registry_id
 }
+
+output "github_actions_oidc_provider_arn" {
+  value = aws_iam_openid_connect_provider.github_actions.arn
+}
+
+output "github_actions_role_name" {
+  value = aws_iam_role.github_actions_ci.name
+}
+
+output "github_actions_role_arn" {
+  value = aws_iam_role.github_actions_ci.arn
+}
+
+output "github_actions_ecr_policy_arn" {
+  value = aws_iam_policy.github_actions_ecr_push.arn
+}

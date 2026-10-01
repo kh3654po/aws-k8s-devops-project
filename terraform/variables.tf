@@ -103,3 +103,13 @@ variable "ecr_max_image_count" {
   type    = number
   default = 50
 }
+
+variable "github_repository" {
+  type    = string
+  default = "kh3654po/aws-k8s-devops-project"
+}
+
+variable "github_branch" {
+  type    = string
+  default = "main"
+}
