@@ -54,7 +54,7 @@ trap cleanup EXIT
 # Required commands
 # ============================================================
 
-for required_command in terraform curl ansible-playbook; do
+for required_command in terraform curl ansible ansible-playbook; do
   if ! command -v "${required_command}" >/dev/null 2>&1; then
     echo "Error: ${required_command} command was not found."
     exit 1
@@ -141,7 +141,7 @@ echo
 # 4. Kubernetes-managed AWS resource cleanup
 # ============================================================
 
-echo "[4/8] Cleaning Kubernetes-managed AWS resources..."
+echo "[4/8] Checking Kubernetes-managed AWS resources..."
 
 if [[ -f "${CLEANUP_MARKER}" ]]; then
   echo "Kubernetes-managed AWS resource cleanup was already completed."
@@ -162,6 +162,10 @@ else
   echo "Using Ansible inventory:"
   echo "${INVENTORY_FILE}"
   echo
+
+# ----------------------------------------------------------
+# Check Ansible connectivity
+# ----------------------------------------------------------
 
   echo "Checking Ansible connectivity to Kubernetes control plane..."
 
@@ -189,22 +193,125 @@ else
   echo
   echo "Ansible connectivity check succeeded."
   echo
-  echo "Cleaning Kubernetes-managed AWS resources..."
 
-  (
+  # ----------------------------------------------------------
+  # Detect Kubernetes control plane state
+  # ----------------------------------------------------------
+
+  echo "Checking Kubernetes control plane state..."
+
+  if ! KUBERNETES_STATE_OUTPUT="$(
     cd "${ANSIBLE_DIR}"
 
-    ansible-playbook \
+    ansible masters \
       -i "${INVENTORY_FILE}" \
-      "${CLEANUP_PLAYBOOK}"
-  )
+      -b \
+      -m shell \
+      -a '
+        if [ -f /etc/kubernetes/admin.conf ]; then
+          echo "KUBERNETES_STATE=INITIALIZED"
 
-  touch "${CLEANUP_MARKER}"
+        elif [ -f /etc/kubernetes/manifests/kube-apiserver.yaml ] \
+          || [ -d /var/lib/etcd/member ]; then
+          echo "KUBERNETES_STATE=INCONSISTENT"
 
+        else
+          echo "KUBERNETES_STATE=NOT_INITIALIZED"
+        fi
+      ' \
+      -o
+  )"; then
+    echo
+    echo "ERROR: Failed to inspect Kubernetes control plane state."
+    echo
+    echo "Terraform destroy has been blocked for safety."
+    exit 1
+  fi
+
+  echo "${KUBERNETES_STATE_OUTPUT}"
   echo
-  echo "Kubernetes-managed AWS resource cleanup completed."
-  echo "Created cleanup marker:"
-  echo "${CLEANUP_MARKER}"
+
+  # ----------------------------------------------------------
+  # Kubernetes initialized
+  # ----------------------------------------------------------
+
+  if grep -q "KUBERNETES_STATE=INITIALIZED" \
+    <<< "${KUBERNETES_STATE_OUTPUT}"; then
+
+    echo "Kubernetes control plane is initialized."
+    echo
+    echo "Cleaning Kubernetes-managed AWS resources..."
+
+    (
+      cd "${ANSIBLE_DIR}"
+
+      ansible-playbook \
+        -i "${INVENTORY_FILE}" \
+        "${CLEANUP_PLAYBOOK}"
+    )
+
+    touch "${CLEANUP_MARKER}"
+
+    echo
+    echo "Kubernetes-managed AWS resource cleanup completed."
+    echo "Created cleanup marker:"
+    echo "${CLEANUP_MARKER}"
+
+  # ----------------------------------------------------------
+  # Kubernetes was never initialized
+  # ----------------------------------------------------------
+
+  elif grep -q "KUBERNETES_STATE=NOT_INITIALIZED" \
+    <<< "${KUBERNETES_STATE_OUTPUT}"; then
+
+    echo "Kubernetes control plane was not initialized."
+    echo
+    echo "The following Kubernetes control plane artifacts were not found:"
+    echo "  - /etc/kubernetes/admin.conf"
+    echo "  - /etc/kubernetes/manifests/kube-apiserver.yaml"
+    echo "  - /var/lib/etcd/member"
+    echo
+    echo "No Kubernetes-managed AWS resources require cleanup."
+    echo "Skipping Kubernetes cleanup."
+
+    touch "${CLEANUP_MARKER}"
+
+    echo
+    echo "Created cleanup marker:"
+    echo "${CLEANUP_MARKER}"
+
+  # ----------------------------------------------------------
+  # Inconsistent Kubernetes state
+  # ----------------------------------------------------------
+
+  elif grep -q "KUBERNETES_STATE=INCONSISTENT" \
+    <<< "${KUBERNETES_STATE_OUTPUT}"; then
+
+    echo "ERROR: Kubernetes control plane is in an inconsistent state."
+    echo
+    echo "/etc/kubernetes/admin.conf does not exist,"
+    echo "but Kubernetes control plane artifacts still exist."
+    echo
+    echo "Possible remaining artifacts:"
+    echo "  - /etc/kubernetes/manifests/kube-apiserver.yaml"
+    echo "  - /var/lib/etcd/member"
+    echo
+    echo "The cluster may have been initialized previously."
+    echo "Kubernetes-managed AWS resources may still exist."
+    echo
+    echo "Terraform destroy has been blocked for safety."
+    exit 1
+
+  # ----------------------------------------------------------
+  # Unknown state
+  # ----------------------------------------------------------
+
+  else
+    echo "ERROR: Unable to determine Kubernetes control plane state."
+    echo
+    echo "Terraform destroy has been blocked for safety."
+    exit 1
+  fi
 fi
 
 echo
