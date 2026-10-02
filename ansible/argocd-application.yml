@@ -1,0 +1,210 @@
+---
+- name: Configure Argo CD GitOps application
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  tasks:
+    - name: Check Kubernetes administrator kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: argocd_application_kubeconfig
+
+    - name: Verify Kubernetes administrator kubeconfig
+      ansible.builtin.assert:
+        that:
+          - argocd_application_kubeconfig.stat.exists
+        fail_msg: >-
+          Kubernetes administrator kubeconfig was not found at
+          {{ kubeconfig_path }}.
+
+    - name: Verify Argo CD Application CRD
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - crd
+          - applications.argoproj.io
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Verify Argo CD AppProject CRD
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - crd
+          - appprojects.argoproj.io
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Render Argo CD AppProject manifest
+      ansible.builtin.template:
+        src: templates/argocd-project.yml.j2
+        dest: "{{ argocd_project_manifest_remote_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Render Argo CD Application manifest
+      ansible.builtin.template:
+        src: templates/argocd-application.yml.j2
+        dest: "{{ argocd_application_manifest_remote_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Apply Argo CD AppProject
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - --filename
+          - "{{ argocd_project_manifest_remote_path }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: argocd_project_apply
+
+      changed_when: >-
+        'created' in argocd_project_apply.stdout or
+        'configured' in argocd_project_apply.stdout
+
+    - name: Apply Argo CD Application
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - --filename
+          - "{{ argocd_application_manifest_remote_path }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: argocd_application_apply
+
+      changed_when: >-
+        'created' in argocd_application_apply.stdout or
+        'configured' in argocd_application_apply.stdout
+
+    - name: Wait for Argo CD Application to become Synced
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - application
+          - "{{ argocd_application_name }}"
+          - --namespace
+          - "{{ argocd_namespace }}"
+          - --output
+          - jsonpath={.status.sync.status}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: argocd_application_sync_status
+      changed_when: false
+
+      retries: 60
+      delay: 5
+
+      until: >-
+        argocd_application_sync_status.stdout
+        | trim
+        == "Synced"
+
+    - name: Wait for Argo CD Application to become Healthy
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - application
+          - "{{ argocd_application_name }}"
+          - --namespace
+          - "{{ argocd_namespace }}"
+          - --output
+          - jsonpath={.status.health.status}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: argocd_application_health_status
+      changed_when: false
+
+      retries: 60
+      delay: 5
+
+      until: >-
+        argocd_application_health_status.stdout
+        | trim
+        == "Healthy"
+
+    - name: Get deployed application image
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - deployment
+          - "{{ argocd_application_name }}"
+          - --namespace
+          - "{{ argocd_application_namespace }}"
+          - --output
+          - jsonpath={.spec.template.spec.containers[0].image}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: argocd_application_image
+      changed_when: false
+
+    - name: Get application resources
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - all
+          - --namespace
+          - "{{ argocd_application_namespace }}"
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: argocd_application_resources
+      changed_when: false
+
+    - name: Get application Service ClusterIP
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - service
+          - "{{ argocd_application_name }}"
+          - --namespace
+          - "{{ argocd_application_namespace }}"
+          - --output
+          - jsonpath={.spec.clusterIP}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: argocd_application_service_ip
+      changed_when: false
+
+    - name: Verify application health endpoint
+      ansible.builtin.uri:
+        url: >-
+          http://{{ argocd_application_service_ip.stdout | trim }}/healthz
+        method: GET
+        status_code: 200
+        return_content: true
+      register: argocd_application_health_endpoint
+
+    - name: Show Argo CD Application result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - " Argo CD GitOps application is healthy"
+          - "=========================================="
+          - "Application : {{ argocd_application_name }}"
+          - "Project     : {{ argocd_project_name }}"
+          - "Sync        : {{ argocd_application_sync_status.stdout }}"
+          - "Health      : {{ argocd_application_health_status.stdout }}"
+          - "Image       : {{ argocd_application_image.stdout }}"
+          - "Health API  : {{ argocd_application_health_endpoint.content }}"
+          - ""
+          - "Resources:"
+          - "{{ argocd_application_resources.stdout_lines }}"
