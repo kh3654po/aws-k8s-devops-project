@@ -235,6 +235,8 @@ pvc_test_storage_size: 1Gi
 # Pre-destroy cleanup
 # ========================================
 destroy_cleanup_namespaces:
+  - ksh-devops-demo
+  - argocd
   - monitoring
   - monitoring-app
   - storage-test
@@ -643,3 +645,46 @@ argocd_values_remote_path: /tmp/argocd-values.yml
 argocd_controller_replicas: 1
 argocd_repo_server_replicas: 1
 argocd_server_replicas: 1
+
+# AWS ECR Credential Provider
+ecr_credential_provider_version: "v1.37.0"
+
+ecr_credential_provider_base_url: >-
+  https://storage.googleapis.com/k8s-staging-provider-aws/releases
+
+ecr_credential_provider_install_dir: /opt/bin
+
+ecr_credential_provider_binary: >-
+  {{ ecr_credential_provider_install_dir }}/ecr-credential-provider
+
+ecr_credential_provider_config_dir: >-
+  /var/lib/kubelet/credential-provider
+
+ecr_credential_provider_config: >-
+  {{ ecr_credential_provider_config_dir }}/ecr-credential-provider-config.yaml
+
+ecr_credential_provider_architecture_map:
+  x86_64: amd64
+  aarch64: arm64
+
+
+# Argo CD Application
+argocd_project_name: ksh-devops
+
+argocd_application_name: ksh-devops-demo
+
+argocd_gitops_repository_url: >-
+  https://github.com/kh3654po/aws-k8s-gitops.git
+
+argocd_gitops_target_revision: main
+
+argocd_gitops_application_path: >-
+  apps/ksh-devops-demo/overlays/production
+
+argocd_application_namespace: ksh-devops-demo
+
+argocd_project_manifest_remote_path: >-
+  /tmp/argocd-ksh-devops-project.yml
+
+argocd_application_manifest_remote_path: >-
+  /tmp/argocd-ksh-devops-demo.yml

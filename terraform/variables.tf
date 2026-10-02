@@ -113,3 +113,13 @@ variable "github_branch" {
   type    = string
   default = "main"
 }
+
+variable "ecr_credential_provider_version" {
+  type    = string
+  default = "v1.37.0"
+}
+
+variable "ecr_credential_provider_base_url" {
+  type = string
+  default = "https://storage.googleapis.com/k8s-staging-provider-aws/releases"
+}

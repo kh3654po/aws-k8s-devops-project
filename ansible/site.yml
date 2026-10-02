@@ -17,6 +17,9 @@
 - name: Join worker nodes to Kubernetes cluster
   ansible.builtin.import_playbook: workers.yml
 
+- name: Configure ECR credential provider on worker nodes
+  ansible.builtin.import_playbook: ecr-credential-provider.yml
+
 - name: Publish kubeadm join command for ASG worker nodes
   ansible.builtin.import_playbook: publish-join-command.yml
 
@@ -70,3 +73,6 @@
 
 - name: Install Argo CD GitOps controller
   ansible.builtin.import_playbook: argocd.yml
+
+- name: Configure Argo CD GitOps application
+  ansible.builtin.import_playbook: argocd-application.yml

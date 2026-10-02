@@ -99,6 +99,9 @@ resource "aws_launch_template" "worker" {
         region                     = var.region
         ssm_join_command_parameter = var.ssm_join_command_parameter
         kubernetes_apt_version     = var.kubernetes_apt_version
+
+        ecr_credential_provider_version  = var.ecr_credential_provider_version
+        ecr_credential_provider_base_url = var.ecr_credential_provider_base_url
       }
     )
   )

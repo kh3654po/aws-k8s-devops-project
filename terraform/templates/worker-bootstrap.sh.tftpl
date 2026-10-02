@@ -19,17 +19,17 @@ export DEBIAN_FRONTEND=noninteractive
 export AWS_REGION="${region}"
 export SSM_JOIN_COMMAND_PARAMETER="${ssm_join_command_parameter}"
 
-echo "[1/10] Running inside cloud-init user data. Skipping cloud-init wait."
+echo "[1/11] Running inside cloud-init user data. Skipping cloud-init wait."
 
 echo
-echo "[2/10] Disabling swap..."
+echo "[2/11] Disabling swap..."
 
 swapoff -a || true
 
 sed -i.bak '/ swap / s/^/#/' /etc/fstab || true
 
 echo
-echo "[3/10] Configuring kernel modules and sysctl..."
+echo "[3/11] Configuring kernel modules and sysctl..."
 
 cat >/etc/modules-load.d/k8s.conf <<'EOF'
 overlay
@@ -48,7 +48,7 @@ EOF
 sysctl --system
 
 echo
-echo "[4/10] Installing base packages..."
+echo "[4/11] Installing base packages..."
 
 apt update -y
 
@@ -61,7 +61,7 @@ apt install -y \
   containerd
 
 echo
-echo "[4-1/10] Installing AWS CLI v2..."
+echo "[4-1/11] Installing AWS CLI v2..."
 
 curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" \
   -o "/tmp/awscliv2.zip"
@@ -75,7 +75,7 @@ unzip -q /tmp/awscliv2.zip -d /tmp
 aws --version
 
 echo
-echo "[5/10] Configuring containerd..."
+echo "[5/11] Configuring containerd..."
 
 mkdir -p /etc/containerd
 
@@ -87,7 +87,7 @@ systemctl restart containerd
 systemctl enable containerd
 
 echo
-echo "[6/10] Installing Kubernetes packages..."
+echo "[6/11] Installing Kubernetes packages..."
 
 mkdir -p /etc/apt/keyrings
 
@@ -107,7 +107,37 @@ apt-mark hold kubelet kubeadm kubectl
 systemctl enable kubelet
 
 echo
-echo "[7/10] Configuring kubelet for AWS external cloud provider..."
+echo "[7/11] Installing ECR credential provider..."
+
+install -d -m 0755 \
+  /opt/bin \
+  /var/lib/kubelet/credential-provider
+
+curl -fsSL \
+  "${ecr_credential_provider_base_url}/${ecr_credential_provider_version}/linux/amd64/ecr-credential-provider-linux-amd64" \
+  -o /opt/bin/ecr-credential-provider
+
+chmod 0755 \
+  /opt/bin/ecr-credential-provider
+
+cat >/var/lib/kubelet/credential-provider/ecr-credential-provider-config.yaml <<'EOF'
+apiVersion: kubelet.config.k8s.io/v1
+kind: CredentialProviderConfig
+
+providers:
+  - name: ecr-credential-provider
+
+    matchImages:
+      - "*.dkr.ecr.*.amazonaws.com"
+      - "*.dkr.ecr.*.amazonaws.com.cn"
+
+    defaultCacheDuration: "12h"
+
+    apiVersion: credentialprovider.kubelet.k8s.io/v1
+EOF
+
+echo
+echo "[8/11] Configuring kubelet for AWS external cloud provider..."
 
 IMDS_TOKEN="$(curl -fsS \
   -X PUT \
@@ -131,14 +161,14 @@ fi
 echo "EC2 local hostname: $${LOCAL_HOSTNAME}"
 
 cat >/etc/default/kubelet <<EOF
-KUBELET_EXTRA_ARGS=--cloud-provider=external --hostname-override=$${LOCAL_HOSTNAME}
+KUBELET_EXTRA_ARGS=--cloud-provider=external --hostname-override=$${LOCAL_HOSTNAME} --image-credential-provider-config=/var/lib/kubelet/credential-provider/ecr-credential-provider-config.yaml --image-credential-provider-bin-dir=/opt/bin
 EOF
 
 echo "Kubelet cloud provider configuration:"
 cat /etc/default/kubelet
 
 echo
-echo "[8/10] Checking whether this node already joined..."
+echo "[9/11] Checking whether this node already joined..."
 
 if [ -f /etc/kubernetes/kubelet.conf ]; then
   echo "This node already has /etc/kubernetes/kubelet.conf."
@@ -147,7 +177,7 @@ if [ -f /etc/kubernetes/kubelet.conf ]; then
 fi
 
 echo
-echo "[9/10] Reading kubeadm join command from SSM Parameter Store..."
+echo "[10/11] Reading kubeadm join command from SSM Parameter Store..."
 
 JOIN_COMMAND="$(aws ssm get-parameter \
   --region "$${AWS_REGION}" \
@@ -164,7 +194,7 @@ fi
 echo "Join command was retrieved from SSM Parameter Store."
 
 echo
-echo "[10/10] Joining Kubernetes cluster..."
+echo "[11/11] Joining Kubernetes cluster..."
 
 $${JOIN_COMMAND}
 
