@@ -1,0 +1,303 @@
+---
+- name: Install Argo CD GitOps controller
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/cluster.yml
+
+  tasks:
+    - name: Check Kubernetes administrator kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: argocd_kubeconfig
+
+    - name: Verify Kubernetes administrator kubeconfig
+      ansible.builtin.assert:
+        that:
+          - argocd_kubeconfig.stat.exists
+        fail_msg: >-
+          Kubernetes administrator kubeconfig was not found at
+          {{ kubeconfig_path }}.
+        success_msg: >-
+          Kubernetes administrator kubeconfig was found.
+
+    - name: Check Helm binary
+      ansible.builtin.stat:
+        path: "{{ helm_binary_path }}"
+      register: argocd_helm
+
+    - name: Verify Helm binary
+      ansible.builtin.assert:
+        that:
+          - argocd_helm.stat.exists
+          - argocd_helm.stat.executable
+        fail_msg: >-
+          Helm binary was not found or is not executable at
+          {{ helm_binary_path }}.
+        success_msg: >-
+          Helm binary was found.
+
+    - name: Ensure Argo CD namespace exists
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        kubectl create namespace {{ argocd_namespace }} \
+          --dry-run=client \
+          --output=yaml |
+        kubectl apply --filename=-
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: argocd_namespace_result
+      changed_when: >-
+        'created' in argocd_namespace_result.stdout or
+        'configured' in argocd_namespace_result.stdout
+
+    - name: Add Argo Helm repository
+      ansible.builtin.command:
+        argv:
+          - "{{ helm_binary_path }}"
+          - repo
+          - add
+          - "{{ argocd_repository_name }}"
+          - "{{ argocd_repository_url }}"
+          - --force-update
+      register: argocd_helm_repository
+      changed_when: >-
+        'has been added' in argocd_helm_repository.stdout
+
+    - name: Update Helm repositories
+      ansible.builtin.command:
+        argv:
+          - "{{ helm_binary_path }}"
+          - repo
+          - update
+      changed_when: false
+
+    - name: Verify Argo CD Helm chart version
+      ansible.builtin.command:
+        argv:
+          - "{{ helm_binary_path }}"
+          - show
+          - chart
+          - "{{ argocd_chart }}"
+          - --version
+          - "{{ argocd_chart_version }}"
+      register: argocd_chart_information
+      changed_when: false
+      failed_when: >-
+        argocd_chart_information.rc != 0 or
+        argocd_chart_version not in argocd_chart_information.stdout or
+        argocd_version not in argocd_chart_information.stdout
+
+    - name: Show Argo CD Helm chart information
+      ansible.builtin.debug:
+        msg: "{{ argocd_chart_information.stdout_lines }}"
+
+    - name: Render Argo CD Helm values
+      ansible.builtin.template:
+        src: templates/argocd-values.yml.j2
+        dest: "{{ argocd_values_remote_path }}"
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Validate Argo CD Helm template
+      ansible.builtin.command:
+        argv:
+          - "{{ helm_binary_path }}"
+          - template
+          - "{{ argocd_release_name }}"
+          - "{{ argocd_chart }}"
+          - --version
+          - "{{ argocd_chart_version }}"
+          - --namespace
+          - "{{ argocd_release_namespace }}"
+          - --values
+          - "{{ argocd_values_remote_path }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Install or upgrade Argo CD
+      ansible.builtin.command:
+        argv:
+          - "{{ helm_binary_path }}"
+          - upgrade
+          - --install
+          - "{{ argocd_release_name }}"
+          - "{{ argocd_chart }}"
+          - --version
+          - "{{ argocd_chart_version }}"
+          - --namespace
+          - "{{ argocd_release_namespace }}"
+          - --values
+          - "{{ argocd_values_remote_path }}"
+          - --wait
+          - --timeout
+          - 10m
+          - --history-max
+          - "10"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: argocd_helm_install
+
+    - name: Show Argo CD Helm installation result
+      ansible.builtin.debug:
+        msg: "{{ argocd_helm_install.stdout_lines }}"
+
+    - name: Verify Argo CD CustomResourceDefinitions
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - crd
+          - "{{ item }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      loop:
+        - applications.argoproj.io
+        - appprojects.argoproj.io
+        - applicationsets.argoproj.io
+      changed_when: false
+
+    - name: Wait for Argo CD application controller
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - statefulset/argocd-application-controller
+          - --namespace
+          - "{{ argocd_namespace }}"
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Wait for Argo CD repo server
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment/argocd-repo-server
+          - --namespace
+          - "{{ argocd_namespace }}"
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Wait for Argo CD server
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment/argocd-server
+          - --namespace
+          - "{{ argocd_namespace }}"
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Wait for Argo CD Redis
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment/argocd-redis
+          - --namespace
+          - "{{ argocd_namespace }}"
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Check Argo CD initial administrator secret
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - secret
+          - argocd-initial-admin-secret
+          - --namespace
+          - "{{ argocd_namespace }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: argocd_initial_admin_secret
+      changed_when: false
+
+    - name: Get Argo CD pods
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pods
+          - --namespace
+          - "{{ argocd_namespace }}"
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: argocd_pods
+      changed_when: false
+
+    - name: Get Argo CD services
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - services
+          - --namespace
+          - "{{ argocd_namespace }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: argocd_services
+      changed_when: false
+
+    - name: Get Argo CD Helm release status
+      ansible.builtin.command:
+        argv:
+          - "{{ helm_binary_path }}"
+          - status
+          - "{{ argocd_release_name }}"
+          - --namespace
+          - "{{ argocd_release_namespace }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: argocd_helm_status
+      changed_when: false
+
+    - name: Show Argo CD pods
+      ansible.builtin.debug:
+        msg: "{{ argocd_pods.stdout_lines }}"
+
+    - name: Show Argo CD services
+      ansible.builtin.debug:
+        msg: "{{ argocd_services.stdout_lines }}"
+
+    - name: Show Argo CD Helm release status
+      ansible.builtin.debug:
+        msg: "{{ argocd_helm_status.stdout_lines }}"
+
+    - name: Show Argo CD installation summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - " Argo CD installation completed"
+          - "=========================================="
+          - "Namespace     : {{ argocd_namespace }}"
+          - "Release       : {{ argocd_release_name }}"
+          - "Chart Version : {{ argocd_chart_version }}"
+          - "Argo CD       : {{ argocd_version }}"
+          - "Server        : ClusterIP"
+          - ""
+          - "The GitOps repository is not connected yet."
+          - "Argo CD Application will be created in the next step."

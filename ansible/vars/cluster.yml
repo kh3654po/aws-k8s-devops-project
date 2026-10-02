@@ -623,3 +623,23 @@ istio_operations_canary_request_count: 200
 istio_operations_circuit_request_count: 20
 
 istio_operations_scrape_wait_seconds: 40
+
+# Argo CD
+argocd_version: "v3.5.3"
+
+argocd_namespace: argocd
+
+argocd_repository_name: argo
+argocd_repository_url: https://argoproj.github.io/argo-helm
+
+argocd_chart: argo/argo-cd
+argocd_chart_version: "10.9.5"
+
+argocd_release_name: argocd
+argocd_release_namespace: "{{ argocd_namespace }}"
+
+argocd_values_remote_path: /tmp/argocd-values.yml
+
+argocd_controller_replicas: 1
+argocd_repo_server_replicas: 1
+argocd_server_replicas: 1

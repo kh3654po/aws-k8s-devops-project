@@ -67,3 +67,6 @@
 
 - name: Install Grafana Alloy Kubernetes event collector
   ansible.builtin.import_playbook: alloy-events.yml
+
+- name: Install Argo CD GitOps controller
+  ansible.builtin.import_playbook: argocd.yml
