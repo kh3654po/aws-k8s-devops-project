@@ -155,6 +155,9 @@ jobs:
       contents: read
       id-token: write
 
+    outputs:
+      image_tag: ${{ steps.image-metadata.outputs.image_tag }}
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -260,4 +263,165 @@ jobs:
             echo "Commit:"
             echo
             echo "\`${GITHUB_SHA}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+
+  # ========================================================
+  # Update GitOps
+  # ========================================================
+
+  update-gitops:
+    name: Update GitOps image tag
+
+    needs:
+      - publish
+
+    if: >-
+      needs.publish.result == 'success'
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    env:
+      GITOPS_REPOSITORY: kh3654po/aws-k8s-gitops
+      GITOPS_BRANCH: main
+
+      GITOPS_KUSTOMIZATION: >-
+        apps/ksh-devops-demo/overlays/production/kustomization.yaml
+
+      IMAGE_TAG: ${{ needs.publish.outputs.image_tag }}
+
+    steps:
+      - name: Validate GitOps configuration
+        env:
+          GITOPS_TOKEN: ${{ secrets.GITOPS_TOKEN }}
+
+        run: |
+          if [[ -z "${GITOPS_TOKEN}" ]]; then
+            echo "ERROR: GITOPS_TOKEN repository secret is empty."
+            exit 1
+          fi
+
+          if [[ -z "${IMAGE_TAG}" ]]; then
+            echo "ERROR: IMAGE_TAG is empty."
+            exit 1
+          fi
+
+          echo "GitOps repository : ${GITOPS_REPOSITORY}"
+          echo "GitOps branch     : ${GITOPS_BRANCH}"
+          echo "Image tag         : ${IMAGE_TAG}"
+
+      - name: Checkout GitOps repository
+        uses: actions/checkout@v7
+
+        with:
+          repository: ${{ env.GITOPS_REPOSITORY }}
+          ref: ${{ env.GITOPS_BRANCH }}
+          token: ${{ secrets.GITOPS_TOKEN }}
+          path: gitops
+
+      - name: Update production image tag
+        shell: bash
+
+        run: |
+          KUSTOMIZATION_FILE="gitops/${GITOPS_KUSTOMIZATION}"
+
+          if [[ ! -f "${KUSTOMIZATION_FILE}" ]]; then
+            echo "ERROR: Kustomization file does not exist:"
+            echo "${KUSTOMIZATION_FILE}"
+            exit 1
+          fi
+
+          echo "Before:"
+          grep \
+            --line-number \
+            --extended-regexp \
+            'newName:|newTag:' \
+            "${KUSTOMIZATION_FILE}"
+
+          sed \
+            --in-place \
+            --extended-regexp \
+            "s|^([[:space:]]*)newTag:.*|\1newTag: ${IMAGE_TAG}|" \
+            "${KUSTOMIZATION_FILE}"
+
+          echo
+          echo "After:"
+          grep \
+            --line-number \
+            --extended-regexp \
+            'newName:|newTag:' \
+            "${KUSTOMIZATION_FILE}"
+
+      - name: Verify GitOps change
+        working-directory: gitops
+
+        shell: bash
+
+        run: |
+          ACTUAL_IMAGE_TAG="$(
+            grep \
+              --extended-regexp \
+              '^[[:space:]]*newTag:' \
+              "${GITOPS_KUSTOMIZATION}" \
+            | head -n 1 \
+            | awk '{print $2}'
+          )"
+
+          if [[ "${ACTUAL_IMAGE_TAG}" != "${IMAGE_TAG}" ]]; then
+            echo "ERROR: GitOps image tag update failed."
+            echo "Expected: ${IMAGE_TAG}"
+            echo "Actual  : ${ACTUAL_IMAGE_TAG}"
+            exit 1
+          fi
+
+          git diff --check
+
+          git diff
+
+      - name: Commit and push GitOps change
+        working-directory: gitops
+
+        shell: bash
+
+        run: |
+          if git diff --quiet; then
+            echo "GitOps repository already uses ${IMAGE_TAG}."
+            exit 0
+          fi
+
+          git config \
+            user.name \
+            "github-actions[bot]"
+
+          git config \
+            user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add \
+            "${GITOPS_KUSTOMIZATION}"
+
+          git commit \
+            -m "chore: update production image to ${IMAGE_TAG}"
+
+          git push \
+            origin \
+            "HEAD:${GITOPS_BRANCH}"
+
+      - name: Show GitOps deployment update
+        run: |
+          {
+            echo "## GitOps deployment update"
+            echo
+            echo "Repository:"
+            echo
+            echo "\`${GITOPS_REPOSITORY}\`"
+            echo
+            echo "Image tag:"
+            echo
+            echo "\`${IMAGE_TAG}\`"
+            echo
+            echo "Argo CD will reconcile this Git commit automatically."
           } >> "${GITHUB_STEP_SUMMARY}"
