@@ -342,8 +342,8 @@ jobs:
             "${KUSTOMIZATION_FILE}"
 
           sed \
-            --in-place \
-            --extended-regexp \
+            -i \
+            -E \
             "s|^([[:space:]]*)newTag:.*|\1newTag: ${IMAGE_TAG}|" \
             "${KUSTOMIZATION_FILE}"
 
