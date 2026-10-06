@@ -67,7 +67,7 @@ func rootHandler(
 			Status:  "ok",
 			Version: version,
 			Commit:  commit,
-			Message: "canary release",
+			Message: "rollback test release",
 		},
 	)
 }
