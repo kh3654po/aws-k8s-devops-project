@@ -19,6 +19,19 @@ controller:
       cpu: 300m
       memory: 256Mi
 
+  metrics:
+    enabled: true
+
+    service:
+      portName: metrics
+      port: 8090
+
+    serviceMonitor:
+      enabled: true
+
+      additionalLabels:
+        release: "{{ kube_prometheus_stack_release_name }}"
+
 providerRBAC:
   enabled: true
 
