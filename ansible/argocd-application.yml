@@ -174,7 +174,7 @@
           - kubectl
           - get
           - service
-          - "{{ argocd_application_name }}"
+          - "{{ argocd_application_stable_service_name }}"
           - --namespace
           - "{{ argocd_application_namespace }}"
           - --output

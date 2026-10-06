@@ -1,0 +1,229 @@
+---
+- name: Install Argo Rollouts progressive delivery controller
+  hosts: masters
+  become: true
+  gather_facts: true
+
+  vars_files:
+    - vars/cluster.yml
+
+  tasks:
+    - name: Check Kubernetes administrator kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: argo_rollouts_kubeconfig
+
+    - name: Verify Kubernetes administrator kubeconfig
+      ansible.builtin.assert:
+        that:
+          - argo_rollouts_kubeconfig.stat.exists
+        fail_msg: >-
+          Kubernetes administrator kubeconfig was not found at
+          {{ kubeconfig_path }}.
+
+    - name: Check Helm binary
+      ansible.builtin.stat:
+        path: "{{ helm_binary_path }}"
+      register: argo_rollouts_helm
+
+    - name: Verify Helm binary
+      ansible.builtin.assert:
+        that:
+          - argo_rollouts_helm.stat.exists
+          - argo_rollouts_helm.stat.executable
+
+    - name: Ensure Argo Rollouts namespace exists
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        kubectl create namespace {{ argo_rollouts_namespace }} \
+          --dry-run=client \
+          --output=yaml |
+        kubectl apply --filename=-
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: argo_rollouts_namespace_result
+
+      changed_when: >-
+        'created' in argo_rollouts_namespace_result.stdout or
+        'configured' in argo_rollouts_namespace_result.stdout
+
+    - name: Add Argo Helm repository
+      ansible.builtin.command:
+        argv:
+          - "{{ helm_binary_path }}"
+          - repo
+          - add
+          - "{{ argo_rollouts_repository_name }}"
+          - "{{ argo_rollouts_repository_url }}"
+          - --force-update
+      changed_when: false
+
+    - name: Update Helm repositories
+      ansible.builtin.command:
+        argv:
+          - "{{ helm_binary_path }}"
+          - repo
+          - update
+      changed_when: false
+
+    - name: Verify Argo Rollouts Helm chart
+      ansible.builtin.command:
+        argv:
+          - "{{ helm_binary_path }}"
+          - show
+          - chart
+          - "{{ argo_rollouts_chart }}"
+          - --version
+          - "{{ argo_rollouts_chart_version }}"
+      register: argo_rollouts_chart_information
+      changed_when: false
+
+      failed_when: >-
+        argo_rollouts_chart_information.rc != 0 or
+        argo_rollouts_chart_version
+        not in argo_rollouts_chart_information.stdout or
+        argo_rollouts_version
+        not in argo_rollouts_chart_information.stdout
+
+    - name: Show Argo Rollouts Helm chart
+      ansible.builtin.debug:
+        msg: "{{ argo_rollouts_chart_information.stdout_lines }}"
+
+    - name: Render Argo Rollouts Helm values
+      ansible.builtin.template:
+        src: templates/argo-rollouts-values.yml.j2
+        dest: "{{ argo_rollouts_values_remote_path }}"
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Validate Argo Rollouts Helm template
+      ansible.builtin.command:
+        argv:
+          - "{{ helm_binary_path }}"
+          - template
+          - "{{ argo_rollouts_release_name }}"
+          - "{{ argo_rollouts_chart }}"
+          - --namespace
+          - "{{ argo_rollouts_namespace }}"
+          - --version
+          - "{{ argo_rollouts_chart_version }}"
+          - --values
+          - "{{ argo_rollouts_values_remote_path }}"
+      changed_when: false
+
+    - name: Install or upgrade Argo Rollouts
+      ansible.builtin.command:
+        argv:
+          - "{{ helm_binary_path }}"
+          - upgrade
+          - --install
+          - "{{ argo_rollouts_release_name }}"
+          - "{{ argo_rollouts_chart }}"
+          - --namespace
+          - "{{ argo_rollouts_namespace }}"
+          - --version
+          - "{{ argo_rollouts_chart_version }}"
+          - --values
+          - "{{ argo_rollouts_values_remote_path }}"
+          - --wait
+          - --timeout
+          - 10m
+          - --history-max
+          - "10"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: argo_rollouts_install
+
+    - name: Verify Argo Rollouts CRDs
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - crd
+          - "{{ item }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      loop:
+        - rollouts.argoproj.io
+        - analysisruns.argoproj.io
+        - analysistemplates.argoproj.io
+        - clusteranalysistemplates.argoproj.io
+        - experiments.argoproj.io
+      changed_when: false
+
+    - name: Wait for Argo Rollouts controller
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment/argo-rollouts
+          - --namespace
+          - "{{ argo_rollouts_namespace }}"
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Validate controller architecture
+      ansible.builtin.assert:
+        that:
+          - >-
+            ansible_facts["architecture"]
+            in argo_rollouts_cli_architecture_map
+
+    - name: Set Argo Rollouts CLI architecture
+      ansible.builtin.set_fact:
+        argo_rollouts_cli_architecture: >-
+          {{
+            argo_rollouts_cli_architecture_map[
+              ansible_facts["architecture"]
+            ]
+          }}
+
+    - name: Install kubectl Argo Rollouts plugin
+      ansible.builtin.get_url:
+        url: >-
+          https://github.com/argoproj/argo-rollouts/releases/download/{{
+            argo_rollouts_version
+          }}/kubectl-argo-rollouts-linux-{{
+            argo_rollouts_cli_architecture
+          }}
+        dest: "{{ argo_rollouts_cli_install_path }}"
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Verify kubectl Argo Rollouts plugin
+      ansible.builtin.command:
+        argv:
+          - "{{ argo_rollouts_cli_install_path }}"
+          - version
+      register: argo_rollouts_cli_version
+      changed_when: false
+
+    - name: Get Argo Rollouts pods
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pods
+          - --namespace
+          - "{{ argo_rollouts_namespace }}"
+          - --output=wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: argo_rollouts_pods
+      changed_when: false
+
+    - name: Show Argo Rollouts result
+      ansible.builtin.debug:
+        msg:
+          - "Argo Rollouts version: {{ argo_rollouts_version }}"
+          - "Chart version: {{ argo_rollouts_chart_version }}"
+          - "{{ argo_rollouts_cli_version.stdout_lines }}"
+          - "{{ argo_rollouts_pods.stdout_lines }}"

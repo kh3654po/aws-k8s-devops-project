@@ -74,5 +74,8 @@
 - name: Install Argo CD GitOps controller
   ansible.builtin.import_playbook: argocd.yml
 
+- name: Install Argo Rollouts progressive delivery controller
+  ansible.builtin.import_playbook: argo-rollouts.yml
+
 - name: Configure Argo CD GitOps application
   ansible.builtin.import_playbook: argocd-application.yml

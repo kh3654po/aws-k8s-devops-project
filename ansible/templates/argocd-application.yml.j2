@@ -25,6 +25,8 @@ spec:
       allowEmpty: false
 
     syncOptions:
+      - ApplyOutOfSyncOnly=true
+      - RespectIgnoreDifferences=true
       - PrunePropagationPolicy=foreground
       - PruneLast=true
 
@@ -35,3 +37,37 @@ spec:
         duration: 5s
         factor: 2
         maxDuration: 3m
+
+  ignoreDifferences:
+    - group: networking.istio.io
+      kind: VirtualService
+      name: ksh-devops-demo
+      namespace: "{{ argocd_application_namespace }}"
+
+      jqPathExpressions:
+        - .spec.http[].route[].weight
+
+    - group: ""
+      kind: Service
+      name: ksh-devops-demo-stable
+      namespace: "{{ argocd_application_namespace }}"
+
+      jqPathExpressions:
+        - '.spec.selector."rollouts-pod-template-hash"'
+
+    - group: ""
+      kind: Service
+      name: ksh-devops-demo-canary
+      namespace: "{{ argocd_application_namespace }}"
+
+      jqPathExpressions:
+        - '.spec.selector."rollouts-pod-template-hash"'
+
+    - group: apps
+      kind: Deployment
+      name: ksh-devops-demo
+      namespace: "{{ argocd_application_namespace }}"
+
+      jsonPointers:
+        - /spec/replicas
+  

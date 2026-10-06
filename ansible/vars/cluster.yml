@@ -236,6 +236,7 @@ pvc_test_storage_size: 1Gi
 # ========================================
 destroy_cleanup_namespaces:
   - ksh-devops-demo
+  - argo-rollouts
   - argocd
   - monitoring
   - monitoring-app
@@ -688,3 +689,29 @@ argocd_project_manifest_remote_path: >-
 
 argocd_application_manifest_remote_path: >-
   /tmp/argocd-ksh-devops-demo.yml
+
+# Argo Rollouts
+argo_rollouts_version: "v1.10.0"
+
+argo_rollouts_namespace: argo-rollouts
+
+argo_rollouts_repository_name: argo
+argo_rollouts_repository_url: https://argoproj.github.io/argo-helm
+
+argo_rollouts_chart: argo/argo-rollouts
+argo_rollouts_chart_version: "2.43.0"
+
+argo_rollouts_release_name: argo-rollouts
+
+argo_rollouts_values_remote_path: /tmp/argo-rollouts-values.yml
+
+argo_rollouts_controller_replicas: 1
+
+argo_rollouts_cli_install_path: /usr/local/bin/kubectl-argo-rollouts
+
+argo_rollouts_cli_architecture_map:
+  x86_64: amd64
+  aarch64: arm64
+
+# Argo CD Application workload
+argocd_application_stable_service_name: ksh-devops-demo-stable

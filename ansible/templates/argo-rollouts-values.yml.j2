@@ -1,0 +1,39 @@
+installCRDs: true
+keepCRDs: true
+
+clusterInstall: true
+
+controller:
+  replicas: {{ argo_rollouts_controller_replicas }}
+
+  logging:
+    level: info
+    format: text
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+
+    limits:
+      cpu: 300m
+      memory: 256Mi
+
+providerRBAC:
+  enabled: true
+
+  providers:
+    istio: true
+
+    smi: false
+    ambassador: false
+    awsLoadBalancerController: false
+    awsAppMesh: false
+    traefik: false
+    apisix: false
+    contour: false
+    glooPlatform: false
+    gatewayAPI: false
+
+dashboard:
+  enabled: false
