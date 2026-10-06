@@ -29,6 +29,7 @@ type response struct {
 	Version   string `json:"version,omitempty"`
 	Commit    string `json:"commit,omitempty"`
 	BuildTime string `json:"build_time,omitempty"`
+	Message   string `json:"message,omitempty"`
 }
 
 func writeJSON(
@@ -66,6 +67,7 @@ func rootHandler(
 			Status:  "ok",
 			Version: version,
 			Commit:  commit,
+			Message: "canary release",
 		},
 	)
 }
