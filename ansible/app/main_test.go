@@ -238,3 +238,32 @@ func TestMethodNotAllowed(t *testing.T) {
 		)
 	}
 }
+
+func TestRootFaultInjection(t *testing.T) {
+	recorder := executeRequest(
+		t,
+		http.MethodGet,
+		"/?fault=true",
+	)
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf(
+			"expected status %d, got %d",
+			http.StatusInternalServerError,
+			recorder.Code,
+		)
+	}
+
+	body := decodeResponse(
+		t,
+		recorder,
+	)
+
+	if body.Status != "fault-injected" {
+		t.Fatalf(
+			"expected status %q, got %q",
+			"fault-injected",
+			body.Status,
+		)
+	}
+}

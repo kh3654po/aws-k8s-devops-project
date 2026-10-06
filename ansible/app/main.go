@@ -59,6 +59,21 @@ func rootHandler(
 		return
 	}
 
+	if r.URL.Query().Get("fault") == "true" {
+		writeJSON(
+			w,
+			http.StatusInternalServerError,
+			response{
+				Service: serviceName,
+				Status:  "fault-injected",
+				Version: version,
+				Commit:  commit,
+			},
+		)
+
+		return
+	}
+
 	writeJSON(
 		w,
 		http.StatusOK,
