@@ -67,7 +67,7 @@ func rootHandler(
 			Status:  "ok",
 			Version: version,
 			Commit:  commit,
-			Message: "rollback test release",
+			Message: "e2e production release",
 		},
 	)
 }
